@@ -205,6 +205,7 @@ button { cursor: pointer; }
 .tooltip { position: fixed; z-index: 30; width: 315px; pointer-events: none; padding: 9px 10px; border: 1px solid var(--controlBorder); background: var(--tooltipBg); box-shadow: 0 4px 12px #0006; }
 .tooltip strong { display: block; overflow-wrap: anywhere; color: var(--text); font: 11px ui-monospace, Consolas, monospace; }
 .tooltip span { display: block; margin-top: 6px; color: var(--mutedStrong); font: 10px ui-monospace, Consolas, monospace; }
+.drop-overlay { position: fixed; inset: 8px; z-index: 40; display: flex; align-items: center; justify-content: center; pointer-events: none; border: 2px dashed var(--accent); background: color-mix(in srgb, var(--surface) 70%, transparent); color: var(--text); font-size: 14px; font-weight: 600; }
 .toast { position: fixed; bottom: 12px; right: 12px; z-index: 50; max-width: 390px; border: 1px solid var(--controlBorder); background: var(--toastBg); color: var(--text); padding: 9px 11px; font-size: 11px; }
 .toast.error { border-color: var(--errorBorder); background: var(--errorBg); }
 

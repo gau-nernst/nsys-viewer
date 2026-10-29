@@ -1,3 +1,4 @@
+import { FileDragDepth, isFileDrag } from "./filedrop";
 import "./style.css";
 import type { KernelEvent, Stage, TraceData, WorkerResponse } from "./types";
 import { overlapDuration, summarizeKernels, type KernelSummary, type TimeSpan } from "./breakdown";
@@ -23,7 +24,7 @@ app.innerHTML = `
     <main>
       <section id="empty-state" class="empty-state" aria-label="Open a trace">
         <h1>Open a trace</h1>
-        <p>Drop an Nsight Systems SQLite export here, or choose a file.</p>
+        <p>Drop an Nsight Systems SQLite export anywhere on the page, or choose a file.</p>
         <button id="drop-button" class="button" type="button">Choose SQLite file…</button>
         <small>The database is read in this browser tab.</small>
       </section>
@@ -98,6 +99,7 @@ app.innerHTML = `
         </section>
       </section>
     </main>
+    <div id="drop-overlay" class="drop-overlay hidden" aria-hidden="true"><span>Drop to open the trace</span></div>
     <div id="toast" class="toast hidden" role="status"></div>
     <div id="tooltip" class="tooltip hidden" role="tooltip"></div>
     <div id="stream-menu" class="stream-menu hidden" role="menu"></div>
@@ -112,6 +114,8 @@ function element<T extends HTMLElement>(selector: string): T {
 
 const fileInput = element<HTMLInputElement>("#file-input");
 const emptyState = element<HTMLElement>("#empty-state");
+const dropOverlay = element<HTMLElement>("#drop-overlay");
+const fileDrag = new FileDragDepth();
 const workspace = element<HTMLElement>("#workspace");
 const rows = element<HTMLDivElement>("#stage-rows");
 const axis = element<HTMLCanvasElement>("#axis-canvas");
@@ -1011,6 +1015,7 @@ function renderDeviceRow(stage: Stage, panel: string): void {
   row.append(meta);
   appendTimeline(row, panel, `${stageLabels[deviceId]} GPU timeline`);
   row.addEventListener("dragover", (event) => {
+    if (isFileDrag(event.dataTransfer?.types)) return;
     event.preventDefault();
     row.classList.add("drop-target");
   });
@@ -1638,16 +1643,33 @@ fileInput.addEventListener("change", () => {
   if (file) void openFile(file);
   fileInput.value = "";
 });
-emptyState.addEventListener("dragover", (event) => {
+// A file can be dropped anywhere in the window, also to replace the open trace; without this the
+// browser navigates to the dropped file and the viewer is lost.
+function showFileDrag(active: boolean): void {
+  dropOverlay.classList.toggle("hidden", !active || !emptyState.classList.contains("hidden"));
+  emptyState.classList.toggle("file-hover", active);
+}
+window.addEventListener("dragenter", (event) => {
+  if (!isFileDrag(event.dataTransfer?.types)) return;
   event.preventDefault();
-  emptyState.classList.add("file-hover");
+  showFileDrag(fileDrag.enter());
 });
-emptyState.addEventListener("dragleave", () => emptyState.classList.remove("file-hover"));
-emptyState.addEventListener("drop", (event) => {
+window.addEventListener("dragover", (event) => {
+  if (!isFileDrag(event.dataTransfer?.types)) return;
   event.preventDefault();
-  emptyState.classList.remove("file-hover");
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+});
+window.addEventListener("dragleave", (event) => {
+  if (!isFileDrag(event.dataTransfer?.types)) return;
+  showFileDrag(fileDrag.leave());
+});
+window.addEventListener("drop", (event) => {
+  if (!isFileDrag(event.dataTransfer?.types)) return;
+  event.preventDefault();
+  fileDrag.reset();
+  showFileDrag(false);
   const file = event.dataTransfer?.files[0];
-  if (file) void openFile(file);
+  if (file && !element<HTMLButtonElement>("#open-button").disabled) void openFile(file);
 });
 element<HTMLButtonElement>("#fit-view").addEventListener("click", () => {
   if (trace) setView(0, trace.durationMs);
