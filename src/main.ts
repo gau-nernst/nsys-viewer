@@ -1248,9 +1248,10 @@ function drawTracks(canvas: HTMLCanvasElement, panel: string): void {
       ctx.fillStyle = kernelColors.get(kernel.nameId) ?? "#587f95";
       ctx.fillRect(x0, top, barWidth, barHeight);
       if (barWidth >= 3 && ctx.globalAlpha > 0.5) {
-        ctx.strokeStyle = colors.edge;
-        ctx.lineWidth = 1;
-        ctx.strokeRect(x0 + 0.5, top + 0.5, barWidth - 1, barHeight - 1);
+        // One 1 px divider at the kernel's start: back-to-back kernels stay 1 px apart. A border on both
+        // sides put 2-3 px of near-background colour between them, which reads as an idle gap.
+        ctx.fillStyle = colors.edge;
+        ctx.fillRect(Math.round(x0), top, 1, barHeight);
       }
       if (!layout.collapsed && barWidth >= 10 && ctx.globalAlpha > 0.5) {
         ctx.save();
