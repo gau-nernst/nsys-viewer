@@ -54,6 +54,8 @@ app.innerHTML = `
               </span>
             </div>
             <div class="toolbar-group toolbar-right">
+              <label class="workspace-picker">Workspace <select id="workspace-select" aria-label="Workspace"></select></label>
+              <button id="new-workspace" class="button button-subtle" type="button" title="Create an empty workspace">New</button>
               <label class="search-box"><span aria-hidden="true">⌕</span><input id="kernel-search" type="search" placeholder="Find kernel" aria-label="Find kernel" /></label>
             </div>
           </div>
@@ -97,6 +99,7 @@ app.innerHTML = `
     </main>
     <div id="toast" class="toast hidden" role="status"></div>
     <div id="tooltip" class="tooltip hidden" role="tooltip"></div>
+    <div id="stream-menu" class="stream-menu hidden" role="menu"></div>
   </div>
 `;
 
@@ -112,6 +115,8 @@ const workspace = element<HTMLElement>("#workspace");
 const rows = element<HTMLDivElement>("#stage-rows");
 const axis = element<HTMLCanvasElement>("#axis-canvas");
 const tooltip = element<HTMLDivElement>("#tooltip");
+const streamMenu = element<HTMLDivElement>("#stream-menu");
+const workspaceSelect = element<HTMLSelectElement>("#workspace-select");
 const toast = element<HTMLDivElement>("#toast");
 const inspector = element<HTMLDivElement>("#inspector-content");
 const search = element<HTMLInputElement>("#kernel-search");
@@ -137,12 +142,44 @@ interface KernelLane {
   activeEnds: number[];
 }
 interface StreamLayout {
+  deviceId: number;
   id: number;
+  key: string;
   top: number;
   laneCount: number;
+  collapsed: boolean;
+  height: number;
+  chipWidth: number;
+}
+const LANE_HEIGHT = 24;
+const COLLAPSED_HEIGHT = 14;
+const TRACK_GAP = 4;
+// A panel is one timeline canvas, i.e. one device row: keyed by device id in
+// the default view, or `ws:<workspace id>:<device id>` for a workspace's row
+// of that device. Workspaces hold streams copied from any device.
+interface StreamRef {
+  deviceId: number;
+  streamId: number;
+}
+interface Workspace {
+  id: string;
+  name: string;
+  tracks: StreamRef[];
 }
 let kernelsByStream = new Map<number, Map<number, KernelLane>>();
-let layoutsByDevice = new Map<number, StreamLayout[]>();
+let layoutsByPanel = new Map<string, StreamLayout[]>();
+// Collapsed tracks, keyed `${panel}|${deviceId}:${streamId}` so a stream can be
+// collapsed in its device row but expanded in a workspace.
+let collapsedStreams = new Set<string>();
+// Collapsed tracks and workspaces live in memory only (not saved to
+// localStorage); they reset when a trace is loaded.
+let workspaces: Workspace[] = [];
+// null is the default per-device view.
+let currentWorkspace: string | null = null;
+// Track selection for bulk actions; it lives within one panel.
+let streamSelection: { panel: string; keys: Set<string>; anchor: string } | null = null;
+// Drop position while dragging a workspace track (drawn as a line).
+let trackDrop: { panel: string; key: string; after: boolean } | null = null;
 let kernelColors = new Map<number, string>();
 let viewStartMs = 0;
 let viewEndMs = 1;
@@ -202,13 +239,15 @@ const darkCanvas = {
   axis: "#252a2f", background: "#171b1f", track: "#252b30",
   alternate: "#20262b", grid: "#394148", text: "#aab4bd",
   edge: "#15191d", hover: "#f4dfb0", selected: "#f0c779",
-  rangeFill: "#d5b26b24", rangeEdge: "#e7c277",
+  rangeFill: "#d5b26b24", rangeEdge: "#e7c277", chip: "#252b30e6",
+  chipSelected: "#d5b26b", chipSelectedText: "#17191c", trackSelected: "#d5b26b1f",
 };
 const lightCanvas = {
   axis: "#f0f2f5", background: "#fff", track: "#edf1f4",
   alternate: "#f5f7f9", grid: "#cbd3da", text: "#4d5b67",
   edge: "#fff", hover: "#644812", selected: "#875714",
-  rangeFill: "#ad854124", rangeEdge: "#9b6b1f",
+  rangeFill: "#ad854124", rangeEdge: "#9b6b1f", chip: "#edf1f4e6",
+  chipSelected: "#9b6b1f", chipSelectedText: "#fff", trackSelected: "#9b6b1f1a",
 };
 
 function canvasColors() {
@@ -277,7 +316,10 @@ function saveLayout(): void {
   try {
     localStorage.setItem(
       currentLayoutKey(),
-      JSON.stringify({ order: stageOrder, labels: stageLabels }),
+      JSON.stringify({
+        order: stageOrder,
+        labels: stageLabels,
+      }),
     );
   } catch {
     // The viewer remains usable when local storage is unavailable.
@@ -287,6 +329,10 @@ function saveLayout(): void {
 function restoreLayout(devices: number[]): void {
   stageOrder = [...devices];
   stageLabels = Object.fromEntries(devices.map((id) => [id, `GPU ${id}`]));
+  collapsedStreams = new Set();
+  workspaces = [];
+  currentWorkspace = null;
+  streamSelection = null;
   try {
     const saved = localStorage.getItem(currentLayoutKey())
       ?? localStorage.getItem(`nsys-sqlite-viewer:layout:${fileKey}`);
@@ -398,6 +444,8 @@ function loadTrace(data: TraceData): void {
   finishTitleEdit(false);
   applyTraceTitle();
   trace = data;
+  hideStreamMenu();
+  trackDrop = null;
   zoomTarget = null;
   hovered = null;
   selected = null;
@@ -409,7 +457,7 @@ function loadTrace(data: TraceData): void {
       events: [], prefixMaxEnd: [], activeEnds: [],
     }])),
   ]));
-  layoutsByDevice = new Map();
+  layoutsByPanel = new Map();
   kernelColors = new Map();
   for (const kernel of data.kernels) {
     const lane = kernelsByStream.get(kernel.deviceId)?.get(kernel.streamId);
@@ -424,18 +472,9 @@ function loadTrace(data: TraceData): void {
       lane.prefixMaxEnd.at(-1) ?? -Infinity,
     ));
   }
-  for (const stage of data.stages) {
-    let top = 4;
-    const layouts = stage.streamIds.map((id) => {
-      const laneCount = kernelsByStream.get(stage.deviceId)?.get(id)?.activeEnds.length ?? 1;
-      const layout = { id, top, laneCount };
-      top += laneCount * 24 + 6;
-      return layout;
-    });
-    layoutsByDevice.set(stage.deviceId, layouts);
-  }
   refreshKernelColors();
   restoreLayout(data.stages.map((stage) => stage.deviceId));
+  computeLayouts();
   viewStartMs = 0;
   viewEndMs = data.durationMs;
   selected = null;
@@ -461,6 +500,302 @@ function loadTrace(data: TraceData): void {
   requestDraw();
   window.clearTimeout(toastTimer);
   toast.classList.add("hidden");
+}
+
+function streamKey(deviceId: number, streamId: number): string {
+  return `${deviceId}:${streamId}`;
+}
+
+function buildLayouts(panel: string,
+  streams: StreamRef[]): StreamLayout[] {
+  let top = 4;
+  return streams.map(({ deviceId, streamId }) => {
+    const laneCount = kernelsByStream.get(deviceId)?.get(streamId)?.activeEnds.length ?? 1;
+    const key = streamKey(deviceId, streamId);
+    const collapsed = collapsedStreams.has(`${panel}|${key}`);
+    const height = collapsed ? COLLAPSED_HEIGHT : laneCount * LANE_HEIGHT + 2;
+    const layout = { deviceId, id: streamId, key, top, laneCount, collapsed, height, chipWidth: 0 };
+    top += height + TRACK_GAP;
+    return layout;
+  });
+}
+
+function computeLayouts(): void {
+  if (!trace) return;
+  layoutsByPanel = new Map();
+  for (const stage of trace.stages) {
+    const streams = stage.streamIds.map((streamId) => ({ deviceId: stage.deviceId, streamId }));
+    layoutsByPanel.set(String(stage.deviceId), buildLayouts(String(stage.deviceId), streams));
+  }
+  // A workspace has one row per device; within it, tracks keep ws.tracks
+  // order, which the user can change by dragging.
+  for (const ws of workspaces) {
+    for (const stage of trace.stages) {
+      const tracks = ws.tracks.filter((item) => item.deviceId === stage.deviceId);
+      if (!tracks.length) continue;
+      const panel = workspacePanel(ws.id, stage.deviceId);
+      layoutsByPanel.set(panel, buildLayouts(panel, tracks));
+    }
+  }
+}
+
+function panelContentHeight(panel: string): number {
+  const last = layoutsByPanel.get(panel)?.at(-1);
+  return last ? last.top + last.height + 6 : 38;
+}
+
+function relayout(): void {
+  computeLayouts();
+  renderRows();
+}
+
+function setCollapsed(panel: string, keys: string[], collapse: boolean): void {
+  for (const key of keys) {
+    if (collapse) collapsedStreams.add(`${panel}|${key}`);
+    else collapsedStreams.delete(`${panel}|${key}`);
+  }
+  relayout();
+}
+
+function workspacePanel(id: string, deviceId: number): string {
+  return `ws:${id}:${deviceId}`;
+}
+
+function isWorkspacePanel(panel: string): boolean {
+  return panel.startsWith("ws:");
+}
+
+function panelWorkspace(panel: string): Workspace | undefined {
+  if (!isWorkspacePanel(panel)) return undefined;
+  const id = panel.split(":")[1];
+  return workspaces.find((item) => item.id === id);
+}
+
+function createWorkspace(): Workspace {
+  const taken = new Set(workspaces.map((ws) => ws.name));
+  let index = workspaces.length + 1;
+  while (taken.has(`Workspace ${index}`)) index++;
+  const ws = { id: Math.random().toString(36).slice(2, 10), name: `Workspace ${index}`, tracks: [] };
+  workspaces.push(ws);
+  return ws;
+}
+
+function switchWorkspace(id: string | null): void {
+  currentWorkspace = id;
+  streamSelection = null;
+  hideStreamMenu();
+  tooltip.classList.add("hidden");
+  hovered = null;
+  renderRows();
+}
+
+function copyToWorkspace(streams: StreamRef[], target: string | null): void {
+  const ws = workspaces.find((item) => item.id === target) ?? createWorkspace();
+  const existing = new Set(ws.tracks.map((item) => streamKey(item.deviceId, item.streamId)));
+  let added = 0;
+  for (const item of streams) {
+    const key = streamKey(item.deviceId, item.streamId);
+    if (existing.has(key) || !kernelsByStream.get(item.deviceId)?.has(item.streamId)) continue;
+    existing.add(key);
+    ws.tracks.push(item);
+    added++;
+  }
+  relayout();
+  announce(added
+    ? `Copied ${added} stream${added === 1 ? "" : "s"} to ${ws.name}`
+    : `Already in ${ws.name}`);
+}
+
+// Where a dragged track would land: before/after a track of the same device,
+// picked by the pointer's panel-space y. Tracks never cross device groups.
+function trackDropAt(panel: string, deviceId: number, y: number):
+  { key: string; after: boolean } | null {
+  const group = (layoutsByPanel.get(panel) ?? []).filter((layout) => layout.deviceId === deviceId);
+  for (const layout of group) {
+    if (y < layout.top + layout.height / 2) return { key: layout.key, after: false };
+  }
+  const last = group.at(-1);
+  return last ? { key: last.key, after: true } : null;
+}
+
+function moveWorkspaceTracks(panel: string, draggedKey: string,
+  drop: { key: string; after: boolean }): void {
+  const ws = panelWorkspace(panel);
+  if (!ws) return;
+  const keyOf = (item: StreamRef) => streamKey(item.deviceId, item.streamId);
+  const dragged = ws.tracks.find((item) => keyOf(item) === draggedKey);
+  if (!dragged) return;
+  // Dragging a selected track moves every selected track on that device.
+  const selectedKeys = isStreamSelected(panel, draggedKey) ? streamSelection?.keys : null;
+  const moving = ws.tracks.filter((item) => item.deviceId === dragged.deviceId &&
+    (selectedKeys ? selectedKeys.has(keyOf(item)) : keyOf(item) === draggedKey));
+  const movingKeys = new Set(moving.map(keyOf));
+  if (movingKeys.has(drop.key)) return;
+  const rest = ws.tracks.filter((item) => !movingKeys.has(keyOf(item)));
+  const index = rest.findIndex((item) => keyOf(item) === drop.key);
+  if (index < 0) return;
+  rest.splice(drop.after ? index + 1 : index, 0, ...moving);
+  ws.tracks = rest;
+  relayout();
+}
+
+function removeFromWorkspace(id: string, keys: Set<string>): void {
+  const ws = workspaces.find((item) => item.id === id);
+  if (!ws) return;
+  ws.tracks = ws.tracks.filter((item) => !keys.has(streamKey(item.deviceId, item.streamId)));
+  for (const item of [...collapsedStreams]) {
+    const [panel, key] = item.split("|");
+    if (panel.startsWith(`ws:${id}:`) && keys.has(key)) collapsedStreams.delete(item);
+  }
+  streamSelection = null;
+  relayout();
+}
+
+function deleteWorkspace(id: string): void {
+  const ws = workspaces.find((item) => item.id === id);
+  if (!ws || !window.confirm(`Delete workspace "${ws.name}"?`)) return;
+  workspaces = workspaces.filter((item) => item !== ws);
+  const prefix = `ws:${id}:`;
+  for (const key of [...collapsedStreams]) {
+    if (key.startsWith(prefix)) collapsedStreams.delete(key);
+  }
+  if (currentWorkspace === id) currentWorkspace = null;
+  streamSelection = null;
+  relayout();
+}
+
+function renderWorkspacePicker(): void {
+  workspaceSelect.replaceChildren(
+    new Option("Default (all GPUs)", ""),
+    ...workspaces.map((ws) => new Option(`${ws.name} · ${ws.tracks.length}`, ws.id)),
+  );
+  workspaceSelect.value = currentWorkspace ?? "";
+}
+
+function isStreamSelected(panel: string, key: string): boolean {
+  return streamSelection?.panel === panel && streamSelection.keys.has(key);
+}
+
+// Click selects one track, Shift+click extends from the last clicked track
+// (in track order), Cmd/Ctrl+click toggles one track.
+function selectStream(panel: string, key: string, event: MouseEvent): void {
+  const order = layoutsByPanel.get(panel)?.map((layout) => layout.key) ?? [];
+  const current = streamSelection?.panel === panel ? streamSelection : null;
+  if (event.shiftKey && current) {
+    const from = order.indexOf(current.anchor);
+    const to = order.indexOf(key);
+    const range = order.slice(Math.min(from, to), Math.max(from, to) + 1);
+    streamSelection = { panel, keys: new Set(range), anchor: current.anchor };
+  } else if ((event.metaKey || event.ctrlKey) && current) {
+    const keys = new Set(current.keys);
+    if (keys.has(key)) keys.delete(key);
+    else keys.add(key);
+    streamSelection = keys.size ? { panel, keys, anchor: key } : null;
+  } else {
+    streamSelection = { panel, keys: new Set([key]), anchor: key };
+  }
+  requestDraw();
+}
+
+function clearStreamSelection(): void {
+  if (!streamSelection) return;
+  streamSelection = null;
+  requestDraw();
+}
+
+function hideStreamMenu(): void {
+  streamMenu.classList.add("hidden");
+}
+
+interface MenuEntry {
+  label: string;
+  action?: () => void;
+  children?: MenuEntry[];
+}
+
+function menuElement(entry: MenuEntry): HTMLElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.role = "menuitem";
+  button.textContent = entry.label;
+  if (!entry.children) {
+    button.addEventListener("click", () => {
+      hideStreamMenu();
+      entry.action?.();
+    });
+    return button;
+  }
+  // Submenus open on hover/focus (CSS); see .stream-submenu.
+  button.classList.add("has-submenu");
+  button.setAttribute("aria-haspopup", "menu");
+  const wrap = document.createElement("div");
+  wrap.className = "submenu-wrap";
+  const submenu = document.createElement("div");
+  submenu.className = "stream-submenu";
+  submenu.role = "menu";
+  submenu.append(...entry.children.map(menuElement));
+  wrap.append(button, submenu);
+  const fitSubmenu = () => {
+    submenu.style.top = "";
+    const { bottom } = submenu.getBoundingClientRect();
+    const overflow = bottom - (window.innerHeight - 4);
+    if (overflow > 0) submenu.style.top = `${-5 - overflow}px`;
+  };
+  wrap.addEventListener("mouseenter", fitSubmenu);
+  wrap.addEventListener("focusin", fitSubmenu);
+  return wrap;
+}
+
+function showStreamMenu(panel: string, event: MouseEvent): void {
+  if (!streamSelection || !trace) return;
+  const keys = new Set(streamSelection.keys);
+  const layouts = layoutsByPanel.get(panel) ?? [];
+  const chosen = layouts.filter((layout) => keys.has(layout.key));
+  const others = layouts.filter((layout) => !keys.has(layout.key)).map((layout) => layout.key);
+  const count = chosen.length === 1 ? trackLabel(panel, chosen[0]) : `${chosen.length} streams`;
+  const streams = chosen.map((layout) => ({ deviceId: layout.deviceId, streamId: layout.id }));
+  const currentId = panelWorkspace(panel)?.id ?? null;
+  const targets = (picked: StreamRef[]): MenuEntry[] => [
+    ...workspaces
+      .filter((ws) => ws.id !== currentId)
+      .map((ws) => ({ label: ws.name, action: () => copyToWorkspace(picked, ws.id) })),
+    { label: "New workspace", action: () => copyToWorkspace(picked, null) },
+  ];
+  const entries: MenuEntry[] = [];
+  if (currentId) {
+    entries.push({ label: `Remove ${count} from workspace`,
+      action: () => removeFromWorkspace(currentId, keys) });
+  }
+  entries.push({ label: `Copy ${count} to workspace`, children: targets(streams) });
+  if (trace.stages.length > 1) {
+    // Same stream id on every device, e.g. to compare ranks.
+    const streamIds = [...new Set(chosen.map((layout) => layout.id))];
+    const label = streamIds.length === 1 ? `S${streamIds[0]}` : `${streamIds.length} stream ids`;
+    entries.push({ label: `Copy ${label} on all GPUs to workspace`, children: targets(
+      streamIds.flatMap((streamId) => stageOrder.map((deviceId) => ({ deviceId, streamId }))),
+    ) });
+  }
+  entries.push(
+    { label: `Collapse ${count}`, action: () => setCollapsed(panel, [...keys], true) },
+    { label: `Expand ${count}`, action: () => setCollapsed(panel, [...keys], false) },
+    { label: "Collapse all others", action: () => {
+      for (const key of others) collapsedStreams.add(`${panel}|${key}`);
+      setCollapsed(panel, [...keys], false);
+    } },
+    { label: "Clear selection", action: clearStreamSelection },
+  );
+  streamMenu.replaceChildren(...entries.map(menuElement));
+  streamMenu.classList.remove("hidden");
+  const { width, height } = streamMenu.getBoundingClientRect();
+  const left = Math.min(event.clientX, window.innerWidth - width - 4);
+  streamMenu.style.left = `${left}px`;
+  streamMenu.style.top = `${Math.min(event.clientY, window.innerHeight - height - 4)}px`;
+  // Open submenus to the left when there is no room on the right.
+  streamMenu.classList.toggle("flip", left + width + 260 > window.innerWidth);
+}
+
+function trackLabel(panel: string, layout: StreamLayout): string {
+  return `S${layout.id}`;
 }
 
 function kernelBreakdown(device: string): { rows: KernelSummary[]; totalGpuMs: number } {
@@ -563,86 +898,147 @@ function renderBreakdown(): void {
   });
 }
 
+// Rows can be thousands of pixels tall (one track per stream). Keep the canvas
+// viewport-sized and sticky, and draw the scrolled-to slice of the row:
+// canvases taller than the GPU max texture size (16384 device px) fall back to
+// software raster and make every frame take hundreds of ms.
+function appendTimeline(row: HTMLElement, panel: string, label: string): void {
+  const canvas = document.createElement("canvas");
+  canvas.className = "stage-canvas";
+  const rowHeight = panelContentHeight(panel);
+  // min-height: a row with few/collapsed tracks still fits its device controls.
+  row.style.minHeight = `${rowHeight}px`;
+  canvas.style.height = `min(${rowHeight - 1}px, calc(100vh - var(--axis-height)))`;
+  canvas.setAttribute("aria-label", label);
+  bindTimelineEvents(canvas, panel);
+  row.append(canvas);
+}
+
+function collapseAllButton(panel: string, keys: string[]): HTMLButtonElement {
+  const allCollapsed = keys.length > 0 && keys.every((key) => collapsedStreams.has(`${panel}|${key}`));
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "stage-collapse";
+  button.textContent = allCollapsed ? "Expand all streams" : "Collapse all streams";
+  button.addEventListener("click", () => setCollapsed(panel, keys, !allCollapsed));
+  return button;
+}
+
+function renderWorkspaceBar(ws: Workspace): void {
+  const bar = document.createElement("div");
+  bar.className = "workspace-bar";
+  const name = document.createElement("input");
+  name.className = "stage-label";
+  name.value = ws.name;
+  name.maxLength = 40;
+  name.setAttribute("aria-label", "Workspace name");
+  name.title = "Rename workspace";
+  name.addEventListener("change", () => {
+    ws.name = name.value.trim() || ws.name;
+    name.value = ws.name;
+    renderWorkspacePicker();
+  });
+  const devices = new Set(ws.tracks.map((item) => item.deviceId)).size;
+  const count = document.createElement("span");
+  count.className = "workspace-count";
+  count.textContent = `${ws.tracks.length} stream${ws.tracks.length === 1 ? "" : "s"} · ` +
+    `${devices} GPU${devices === 1 ? "" : "s"}`;
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "stage-collapse";
+  remove.textContent = "Delete workspace";
+  remove.addEventListener("click", () => deleteWorkspace(ws.id));
+  bar.append(name, count, remove);
+  rows.append(bar);
+  if (!ws.tracks.length) {
+    const hint = document.createElement("div");
+    hint.className = "workspace-empty";
+    hint.textContent = "Empty workspace. In Default, right-click a stream (or a selection) " +
+      "and choose Copy to workspace.";
+    rows.append(hint);
+  }
+}
+
+// One device row: the default view's row of all the device's streams, or a
+// workspace's row of the streams it holds for that device.
+function renderDeviceRow(stage: Stage, panel: string): void {
+  const deviceId = stage.deviceId;
+  const row = document.createElement("div");
+  row.className = "stage-row";
+  row.dataset.deviceId = String(deviceId);
+  row.dataset.panel = panel;
+
+  const meta = document.createElement("div");
+  meta.className = "stage-meta";
+  const top = document.createElement("div");
+  top.className = "stage-top";
+  const handle = document.createElement("span");
+  handle.className = "drag-handle";
+  handle.textContent = "⠿";
+  handle.draggable = true;
+  handle.title = "Drag to reorder";
+  handle.setAttribute("aria-label", `Drag ${stageLabels[deviceId]} to reorder`);
+  handle.addEventListener("dragstart", (event) => {
+    event.dataTransfer?.setData("text/plain", String(deviceId));
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+    row.classList.add("dragging");
+  });
+  handle.addEventListener("dragend", () => row.classList.remove("dragging"));
+
+  const label = document.createElement("input");
+  label.className = "stage-label";
+  label.value = stageLabels[deviceId];
+  label.maxLength = 24;
+  label.setAttribute("aria-label", `Label for CUDA device ${deviceId}`);
+  label.title = "Edit device label";
+  label.addEventListener("change", () => {
+    stageLabels[deviceId] = label.value.trim() || `GPU ${deviceId}`;
+    label.value = stageLabels[deviceId];
+    saveLayout();
+  });
+  top.append(handle, label);
+
+  const sub = document.createElement("div");
+  sub.className = "stage-sub";
+  sub.textContent = `GPU ${stage.deviceId} · PID ${stage.pid ?? "?"}`;
+  sub.title = `${stage.kernelCount.toLocaleString()} kernels`;
+
+  const keys = (layoutsByPanel.get(panel) ?? []).map((layout) => layout.key);
+  meta.append(top, sub, collapseAllButton(panel, keys));
+
+  row.append(meta);
+  appendTimeline(row, panel, `${stageLabels[deviceId]} GPU timeline`);
+  row.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    row.classList.add("drop-target");
+  });
+  row.addEventListener("dragleave", () => row.classList.remove("drop-target"));
+  row.addEventListener("drop", (event) => {
+    event.preventDefault();
+    row.classList.remove("drop-target");
+    const draggedId = event.dataTransfer?.getData("text/plain");
+    if (!draggedId) return;
+    const from = Number(draggedId);
+    if (!stageOrder.includes(from) || from === deviceId) return;
+    stageOrder.splice(stageOrder.indexOf(from), 1);
+    stageOrder.splice(stageOrder.indexOf(deviceId), 0, from);
+    saveLayout();
+    renderRows();
+  });
+  rows.append(row);
+}
+
 function renderRows(): void {
   if (!trace) return;
   rows.replaceChildren();
+  renderWorkspacePicker();
+  const ws = workspaces.find((item) => item.id === currentWorkspace);
+  if (ws) renderWorkspaceBar(ws);
   for (const deviceId of stageOrder) {
     const stage = trace.stages.find((item) => item.deviceId === deviceId);
     if (!stage) continue;
-
-    const row = document.createElement("div");
-    row.className = "stage-row";
-    row.dataset.deviceId = String(deviceId);
-
-    const meta = document.createElement("div");
-    meta.className = "stage-meta";
-    const top = document.createElement("div");
-    top.className = "stage-top";
-    const handle = document.createElement("span");
-    handle.className = "drag-handle";
-    handle.textContent = "⠿";
-    handle.draggable = true;
-    handle.title = "Drag to reorder";
-    handle.setAttribute("aria-label", `Drag ${stageLabels[deviceId]} to reorder`);
-    handle.addEventListener("dragstart", (event) => {
-      event.dataTransfer?.setData("text/plain", String(deviceId));
-      if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
-      row.classList.add("dragging");
-    });
-    handle.addEventListener("dragend", () => row.classList.remove("dragging"));
-
-    const label = document.createElement("input");
-    label.className = "stage-label";
-    label.value = stageLabels[deviceId];
-    label.maxLength = 24;
-    label.setAttribute("aria-label", `Label for CUDA device ${deviceId}`);
-    label.title = "Edit device label";
-    label.addEventListener("change", () => {
-      stageLabels[deviceId] = label.value.trim() || `GPU ${deviceId}`;
-      label.value = stageLabels[deviceId];
-      saveLayout();
-    });
-    top.append(handle, label);
-
-    const sub = document.createElement("div");
-    sub.className = "stage-sub";
-    sub.textContent = `GPU ${stage.deviceId} · PID ${stage.pid ?? "?"}`;
-    sub.title = `${stage.kernelCount.toLocaleString()} kernels`;
-
-    meta.append(top, sub);
-
-    const canvas = document.createElement("canvas");
-    canvas.className = "stage-canvas";
-    const layouts = layoutsByDevice.get(deviceId) ?? [];
-    const last = layouts.at(-1);
-    const rowHeight = last ? last.top + last.laneCount * 24 + 8 : 38;
-    row.style.height = `${rowHeight}px`;
-    // Rows can be thousands of pixels tall (one track per stream). Keep the
-    // canvas viewport-sized and sticky, and draw the scrolled-to slice of the
-    // row: canvases taller than the GPU max texture size (16384 device px)
-    // fall back to software raster and make every frame take hundreds of ms.
-    canvas.style.height = `min(${rowHeight - 1}px, calc(100vh - var(--axis-height)))`;
-    canvas.setAttribute("aria-label", `${stageLabels[deviceId]} GPU timeline`);
-    bindTimelineEvents(canvas, stage);
-    row.append(meta, canvas);
-    row.addEventListener("dragover", (event) => {
-      event.preventDefault();
-      row.classList.add("drop-target");
-    });
-    row.addEventListener("dragleave", () => row.classList.remove("drop-target"));
-    row.addEventListener("drop", (event) => {
-      event.preventDefault();
-      row.classList.remove("drop-target");
-      const draggedId = event.dataTransfer?.getData("text/plain");
-      if (!draggedId) return;
-      const from = Number(draggedId);
-      if (!stageOrder.includes(from) || from === deviceId) return;
-      stageOrder.splice(stageOrder.indexOf(from), 1);
-      stageOrder.splice(stageOrder.indexOf(deviceId), 0, from);
-      saveLayout();
-      renderRows();
-    });
-    rows.append(row);
+    const panel = ws ? workspacePanel(ws.id, deviceId) : String(deviceId);
+    if (layoutsByPanel.has(panel)) renderDeviceRow(stage, panel);
   }
   requestDraw();
 }
@@ -767,37 +1163,38 @@ function firstVisible(lane: KernelLane, start: number): number {
   return low;
 }
 
-// How far the sticky canvas has slid down inside its row, i.e. the row-space y
-// of the canvas's top edge.
-function rowScrollOffset(canvas: HTMLCanvasElement): number {
+// Panel-space y of the canvas's top edge: how far the sticky canvas has slid
+// down inside its row.
+function trackOffset(canvas: HTMLCanvasElement, panel: string): number {
   const row = canvas.parentElement;
   if (!row) return 0;
   return canvas.getBoundingClientRect().top - row.getBoundingClientRect().top;
 }
 
-function drawStage(canvas: HTMLCanvasElement, stage: Stage): void {
+function drawTracks(canvas: HTMLCanvasElement, panel: string): void {
   const rowRect = canvas.parentElement?.getBoundingClientRect();
   if (rowRect && (rowRect.bottom < 0 || rowRect.top > window.innerHeight)) return;
   const surface = prepareCanvas(canvas);
   if (!surface || !trace) return;
   const { context: ctx, width, height } = surface;
-  const offset = rowScrollOffset(canvas);
+  const offset = trackOffset(canvas, panel);
   const colors = canvasColors();
   ctx.fillStyle = colors.background;
   ctx.fillRect(0, 0, width, height);
-  const allLayouts = layoutsByDevice.get(stage.deviceId) ?? [];
+  const allLayouts = layoutsByPanel.get(panel) ?? [];
   const isVisible = (layout: StreamLayout) =>
-    layout.top + layout.laneCount * 24 + 2 > offset && layout.top < offset + height;
+    layout.top + layout.height > offset && layout.top < offset + height;
   const layouts = allLayouts.filter(isVisible);
   ctx.save();
   ctx.translate(0, -offset);
   for (const [index, layout] of allLayouts.entries()) {
     if (!isVisible(layout)) continue;
     ctx.fillStyle = index % 2 ? colors.alternate : colors.track;
-    ctx.fillRect(0, layout.top, width, layout.laneCount * 24 + 2);
-    ctx.font = "10px ui-monospace, SFMono-Regular, Consolas, monospace";
-    ctx.fillStyle = colors.text;
-    ctx.fillText(`S${layout.id}`, 6, layout.top + 16);
+    ctx.fillRect(0, layout.top, width, layout.height);
+    if (isStreamSelected(panel, layout.key)) {
+      ctx.fillStyle = colors.trackSelected;
+      ctx.fillRect(0, layout.top, width, layout.height);
+    }
   }
   ctx.restore();
 
@@ -816,7 +1213,7 @@ function drawStage(canvas: HTMLCanvasElement, stage: Stage): void {
   ctx.save();
   ctx.translate(0, -offset);
   for (const layout of layouts) {
-    const lane = kernelsByStream.get(stage.deviceId)?.get(layout.id);
+    const lane = kernelsByStream.get(layout.deviceId)?.get(layout.id);
     if (!lane) continue;
     const lastTinyPixel = new Array<number>(layout.laneCount).fill(-1);
     for (let i = firstVisible(lane, viewStartMs); i < lane.events.length; i++) {
@@ -826,20 +1223,22 @@ function drawStage(canvas: HTMLCanvasElement, stage: Stage): void {
       const x0 = Math.max(0, xFor(kernel.startMs, width));
       const x1 = Math.min(width, xFor(kernel.endMs, width));
       const barWidth = Math.max(1, x1 - x0);
-      const overlapLane = kernel.overlapLane ?? 0;
-      const top = layout.top + 3 + overlapLane * 24;
+      // A collapsed stream draws every overlap lane into one thin strip.
+      const overlapLane = layout.collapsed ? 0 : kernel.overlapLane ?? 0;
+      const top = layout.top + (layout.collapsed ? 3 : 3 + overlapLane * LANE_HEIGHT);
+      const barHeight = layout.collapsed ? COLLAPSED_HEIGHT - 6 : 20;
       if (barWidth <= 1 && Math.floor(x0) === lastTinyPixel[overlapLane]) continue;
       if (barWidth <= 1) lastTinyPixel[overlapLane] = Math.floor(x0);
       const name = trace.names[kernel.nameId] ?? "";
       ctx.globalAlpha = term && !name.toLowerCase().includes(term) ? 0.13 : 0.92;
       ctx.fillStyle = kernelColors.get(kernel.nameId) ?? "#587f95";
-      ctx.fillRect(x0, top, barWidth, 20);
+      ctx.fillRect(x0, top, barWidth, barHeight);
       if (barWidth >= 3 && ctx.globalAlpha > 0.5) {
         ctx.strokeStyle = colors.edge;
         ctx.lineWidth = 1;
-        ctx.strokeRect(x0 + 0.5, top + 0.5, barWidth - 1, 19);
+        ctx.strokeRect(x0 + 0.5, top + 0.5, barWidth - 1, barHeight - 1);
       }
-      if (barWidth >= 10 && ctx.globalAlpha > 0.5) {
+      if (!layout.collapsed && barWidth >= 10 && ctx.globalAlpha > 0.5) {
         ctx.save();
         ctx.beginPath();
         ctx.rect(x0 + 2, top, barWidth - 3, 20);
@@ -852,9 +1251,29 @@ function drawStage(canvas: HTMLCanvasElement, stage: Stage): void {
         ctx.globalAlpha = 1;
         ctx.strokeStyle = kernel === selected ? colors.selected : colors.hover;
         ctx.lineWidth = 2;
-        ctx.strokeRect(x0 + 0.5, top + 0.5, Math.max(2, x1 - x0), 19);
+        ctx.strokeRect(x0 + 0.5, top + 0.5, Math.max(2, x1 - x0), barHeight - 1);
       }
     }
+  }
+  // Stream chips go on top of the bars so they stay readable and clickable.
+  ctx.globalAlpha = 1;
+  ctx.font = "10px ui-monospace, SFMono-Regular, Consolas, monospace";
+  for (const layout of layouts) {
+    const text = `${layout.collapsed ? "▸" : "▾"} ${trackLabel(panel, layout)}`;
+    const chipHeight = layout.collapsed ? COLLAPSED_HEIGHT - 2 : 16;
+    layout.chipWidth = Math.ceil(ctx.measureText(text).width) + 8;
+    const chipSelected = isStreamSelected(panel, layout.key);
+    ctx.fillStyle = chipSelected ? colors.chipSelected : colors.chip;
+    ctx.fillRect(2, layout.top + 1, layout.chipWidth, chipHeight);
+    ctx.fillStyle = chipSelected ? colors.chipSelectedText : colors.text;
+    ctx.fillText(text, 6, layout.top + 1 + chipHeight / 2);
+  }
+  const drop = trackDrop?.panel === panel ? trackDrop : null;
+  const dropLayout = drop && allLayouts.find((layout) => layout.key === drop.key);
+  if (drop && dropLayout) {
+    const y = drop.after ? dropLayout.top + dropLayout.height + TRACK_GAP / 2 : dropLayout.top - TRACK_GAP / 2;
+    ctx.fillStyle = colors.rangeEdge;
+    ctx.fillRect(0, y - 1, width, 2);
   }
   ctx.restore();
   ctx.globalAlpha = 1;
@@ -865,11 +1284,9 @@ function draw(): void {
   drawPending = false;
   if (!trace) return;
   drawAxis();
-  for (const stage of trace.stages) {
-    const canvas = rows.querySelector<HTMLCanvasElement>(
-      `.stage-row[data-device-id="${stage.deviceId}"] canvas`,
-    );
-    if (canvas) drawStage(canvas, stage);
+  for (const row of Array.from(rows.querySelectorAll<HTMLElement>(".stage-row"))) {
+    const canvas = row.querySelector("canvas");
+    if (canvas && row.dataset.panel) drawTracks(canvas, row.dataset.panel);
   }
   element<HTMLElement>("#view-range").textContent =
     `${formatTime(viewStartMs)} — ${formatTime(viewEndMs)}`;
@@ -927,25 +1344,48 @@ function animateZoom(): void {
   requestDraw();
 }
 
-function hitKernel(stage: Stage, canvas: HTMLCanvasElement, event: PointerEvent): KernelEvent | null {
+function layoutAt(panel: string, canvas: HTMLCanvasElement,
+  event: MouseEvent): StreamLayout | undefined {
+  const y = event.clientY - canvas.getBoundingClientRect().top + trackOffset(canvas, panel);
+  return layoutsByPanel.get(panel)?.find(
+    (item) => y >= item.top && y < item.top + item.height,
+  );
+}
+
+function hitChip(panel: string, canvas: HTMLCanvasElement,
+  event: MouseEvent): { layout: StreamLayout; onArrow: boolean } | null {
+  const layout = layoutAt(panel, canvas, event);
+  if (!layout) return null;
+  const rect = canvas.getBoundingClientRect();
+  const x = event.clientX - rect.left;
+  const y = event.clientY - rect.top + trackOffset(canvas, panel);
+  const chipHeight = layout.collapsed ? COLLAPSED_HEIGHT - 2 : 16;
+  const inside = x >= 2 && x < 2 + layout.chipWidth &&
+    y >= layout.top + 1 && y < layout.top + 1 + chipHeight;
+  return inside ? { layout, onArrow: x < 14 } : null;
+}
+
+function hitKernel(panel: string, canvas: HTMLCanvasElement, event: PointerEvent): KernelEvent | null {
   if (!trace) return null;
   const rect = canvas.getBoundingClientRect();
   const x = event.clientX - rect.left;
-  const y = event.clientY - rect.top + rowScrollOffset(canvas);
+  const y = event.clientY - rect.top + trackOffset(canvas, panel);
   const time = viewStartMs + (x / rect.width) * (viewEndMs - viewStartMs);
-  const layout = layoutsByDevice.get(stage.deviceId)?.find(
-    (item) => y >= item.top && y < item.top + item.laneCount * 24,
-  );
+  const layout = layoutAt(panel, canvas, event);
   if (!layout) return null;
-  const overlapLane = Math.floor((y - layout.top) / 24);
-  const lane = kernelsByStream.get(stage.deviceId)?.get(layout.id);
+  const overlapLane = Math.floor((y - layout.top) / LANE_HEIGHT);
+  const lane = kernelsByStream.get(layout.deviceId)?.get(layout.id);
   if (!lane) return null;
   let best: KernelEvent | null = null;
   for (let i = firstVisible(lane, time); i < lane.events.length; i++) {
     const kernel = lane.events[i];
     if (kernel.startMs > time) break;
-    if (kernel.endMs < time || kernel.overlapLane !== overlapLane) continue;
-    if (!best || kernel.endMs - kernel.startMs < best.endMs - best.startMs) best = kernel;
+    if (kernel.endMs < time) continue;
+    if (!layout.collapsed && kernel.overlapLane !== overlapLane) continue;
+    // A collapsed track paints overlapping kernels in event order, so the
+    // visible one is the last match; expanded lanes never overlap.
+    if (layout.collapsed) best = kernel;
+    else if (!best || kernel.endMs - kernel.startMs < best.endMs - best.startMs) best = kernel;
   }
   return best;
 }
@@ -1006,9 +1446,10 @@ function inspect(kernel: KernelEvent): void {
 type TimelineDrag =
   | { mode: "pan"; x: number; start: number; end: number; moved: boolean }
   | { mode: "new"; x: number; anchor: number; moved: boolean }
-  | { mode: "start" | "end" };
+  | { mode: "start" | "end" }
+  | { mode: "track"; key: string; deviceId: number; y: number; moved: boolean };
 
-function bindTimelineEvents(canvas: HTMLCanvasElement, stage?: Stage): void {
+function bindTimelineEvents(canvas: HTMLCanvasElement, panel?: string): void {
   let drag: TimelineDrag | null = null;
   const timeAt = (event: PointerEvent): number => {
     const rect = canvas.getBoundingClientRect();
@@ -1032,6 +1473,27 @@ function bindTimelineEvents(canvas: HTMLCanvasElement, stage?: Stage): void {
   }, { passive: false });
   canvas.addEventListener("pointerdown", (event) => {
     if (event.button !== 0 && event.button !== 1) return;
+    hideStreamMenu();
+    const chip = event.button === 0 && panel ? hitChip(panel, canvas, event) : null;
+    if (chip && panel) {
+      if (chip.onArrow) {
+        setCollapsed(panel, [chip.layout.key], !chip.layout.collapsed);
+        return;
+      }
+      const key = chip.layout.key;
+      if (!isWorkspacePanel(panel)) {
+        selectStream(panel, key, event);
+        return;
+      }
+      // In a workspace a chip can be dragged to reorder. Pressing an already
+      // selected chip keeps the selection so it moves as a block; a click
+      // without dragging narrows the selection to it on pointerup.
+      const modifier = event.shiftKey || event.metaKey || event.ctrlKey;
+      if (modifier || !isStreamSelected(panel, key)) selectStream(panel, key, event);
+      drag = { mode: "track", key, deviceId: chip.layout.deviceId, y: event.clientY, moved: false };
+      canvas.setPointerCapture(event.pointerId);
+      return;
+    }
     const rect = canvas.getBoundingClientRect();
     const x = event.clientX - rect.left;
     if (event.shiftKey || event.button === 1) {
@@ -1056,6 +1518,16 @@ function bindTimelineEvents(canvas: HTMLCanvasElement, stage?: Stage): void {
     }
   });
   canvas.addEventListener("pointermove", (event) => {
+    if (drag?.mode === "track") {
+      if (Math.abs(event.clientY - drag.y) > 4) drag.moved = true;
+      if (!drag.moved || !panel) return;
+      canvas.style.cursor = "grabbing";
+      const y = event.clientY - canvas.getBoundingClientRect().top + trackOffset(canvas, panel);
+      const drop = trackDropAt(panel, drag.deviceId, y);
+      trackDrop = drop ? { panel, ...drop } : null;
+      requestDraw();
+      return;
+    }
     if (drag) {
       if (drag.mode === "pan") {
         const delta = event.clientX - drag.x;
@@ -1094,8 +1566,9 @@ function bindTimelineEvents(canvas: HTMLCanvasElement, stage?: Stage): void {
     const nearEdge = selection && [selection.start, selection.end].some(
       (time) => Math.abs(x - xFor(time, rect.width)) <= 8,
     );
-    canvas.style.cursor = nearEdge ? "ew-resize" : "crosshair";
-    const kernel = stage ? hitKernel(stage, canvas, event) : null;
+    const onChip = !nearEdge && panel ? hitChip(panel, canvas, event) : null;
+    canvas.style.cursor = nearEdge ? "ew-resize" : onChip ? "pointer" : "crosshair";
+    const kernel = panel && !onChip ? hitKernel(panel, canvas, event) : null;
     if (hovered !== kernel) {
       hovered = kernel;
       requestDraw();
@@ -1103,14 +1576,39 @@ function bindTimelineEvents(canvas: HTMLCanvasElement, stage?: Stage): void {
     if (kernel) showTooltip(kernel, event);
     else tooltip.classList.add("hidden");
   });
+  canvas.addEventListener("contextmenu", (event) => {
+    if (!panel) return;
+    const layout = layoutAt(panel, canvas, event);
+    if (!layout) return;
+    event.preventDefault();
+    if (!isStreamSelected(panel, layout.key)) {
+      streamSelection = { panel, keys: new Set([layout.key]), anchor: layout.key };
+      requestDraw();
+    }
+    tooltip.classList.add("hidden");
+    showStreamMenu(panel, event);
+  });
   canvas.addEventListener("pointerup", (event) => {
+    if (drag?.mode === "track") {
+      const { key, moved } = drag;
+      const drop = trackDrop;
+      drag = null;
+      trackDrop = null;
+      canvas.style.cursor = "crosshair";
+      if (moved && drop && panel) moveWorkspaceTracks(panel, key, drop);
+      else if (!moved && panel && !event.shiftKey && !event.metaKey && !event.ctrlKey) {
+        selectStream(panel, key, event);
+      }
+      requestDraw();
+      return;
+    }
     if (drag?.mode === "new" && !drag.moved) {
       if (selection) {
         const time = timeAt(event);
         if (time < selection.start || time > selection.end) setSelection(null);
       }
-      if (stage) {
-        const kernel = hitKernel(stage, canvas, event);
+      if (panel) {
+        const kernel = hitKernel(panel, canvas, event);
         if (kernel) inspect(kernel);
       }
     }
@@ -1119,6 +1617,7 @@ function bindTimelineEvents(canvas: HTMLCanvasElement, stage?: Stage): void {
   });
   canvas.addEventListener("pointercancel", () => {
     drag = null;
+    trackDrop = null;
     canvas.style.cursor = "crosshair";
   });
   canvas.addEventListener("pointerleave", () => {
@@ -1161,9 +1660,23 @@ element<HTMLElement>(".viewer-card").addEventListener("wheel", (event) => {
 }, { capture: true, passive: false });
 element<HTMLButtonElement>("#clear-selection").addEventListener("click", () => setSelection(null));
 window.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && selection) setSelection(null);
+  if (event.key !== "Escape") return;
+  if (!streamMenu.classList.contains("hidden")) hideStreamMenu();
+  else if (streamSelection) clearStreamSelection();
+  else if (selection) setSelection(null);
 });
+window.addEventListener("pointerdown", (event) => {
+  if (!streamMenu.contains(event.target as Node)) hideStreamMenu();
+}, { capture: true });
+window.addEventListener("scroll", hideStreamMenu, { passive: true });
 bindTimelineEvents(axis);
+workspaceSelect.addEventListener("change", () => switchWorkspace(workspaceSelect.value || null));
+element<HTMLButtonElement>("#new-workspace").addEventListener("click", () => {
+  if (!trace) return;
+  const ws = createWorkspace();
+  computeLayouts();
+  switchWorkspace(ws.id);
+});
 breakdownDevice.addEventListener("change", renderBreakdown);
 document.querySelectorAll<HTMLButtonElement>(
   ".breakdown-table thead button",

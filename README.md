@@ -28,6 +28,8 @@ URL such as `https://<user>.github.io/<repo>/` and when previewed locally.
 
 Drag device rows to reorder them, or edit their labels. Drag across the timeline to measure a span; drag its edges to adjust it. Shift+drag or scroll horizontally to pan, and pinch or use +/− to zoom. Click a kernel for details. Row order and labels are saved locally in the browser.
 
+Each stream is a track. Click a track's ▾/▸ arrow to collapse or expand it. Click its label to select it; Shift+click selects a range and Cmd/Ctrl+click toggles one. Right-click a track to collapse, expand or collapse all other tracks, or to copy the selection (or the same stream on every GPU) to a workspace. Workspaces, picked from the timeline toolbar, show only the copied streams, still grouped by GPU; drag a track's label to reorder it within its GPU. Collapsed tracks and workspaces are kept in memory only and reset when a trace is opened.
+
 The browser tab title defaults to the SQLite filename. Double-click the trace heading or click **Rename** to set an alias; Enter or clicking away saves it, and Escape cancels. **Reset title** restores the filename. Aliases are saved locally per filename and file size.
 
 Measuring a span switches the kernel breakdown to that span. **Span %** is summed kernel time inside the selection divided by its duration; concurrent launches and multiple GPUs can exceed 100%. Kernels crossing either boundary contribute only their time inside the span. Calls count launches overlapping the selection, and Avg uses their clipped durations. Hover or click a kernel to see its individual contribution alongside its full duration. Clearing the selection restores the full-trace breakdown. Device and name filters still apply; searching does not change percentage denominators.

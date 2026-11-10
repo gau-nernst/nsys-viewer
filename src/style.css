@@ -157,6 +157,15 @@ button { cursor: pointer; }
 .stage-label:hover, .stage-label:focus { border-color: var(--controlBorder); background: var(--hover); }
 .stage-sub { margin: 5px 0 0 21px; color: var(--muted); font: 10px ui-monospace, Consolas, monospace; white-space: nowrap; }
 /* Sticky below the axis so a tall row (many streams) only needs a viewport-sized canvas. */
+.workspace-bar { display: flex; align-items: center; gap: 12px; padding: 6px 10px; border-bottom: 1px solid var(--border); background: var(--raised); }
+.workspace-bar .stage-label { width: 220px; }
+.workspace-bar .stage-collapse { margin: 0 0 0 auto; }
+.workspace-count { color: var(--muted); font: 11px ui-monospace, Consolas, monospace; }
+.workspace-empty { display: flex; align-items: center; padding: 24px 16px; color: var(--muted); font-size: 12px; }
+.workspace-picker { display: flex; align-items: center; gap: 6px; color: var(--mutedStrong); font-size: 12px; }
+.workspace-picker select { height: 28px; max-width: 220px; border: 1px solid var(--controlBorder); background: var(--raised); color: var(--text); font-size: 12px; }
+.stage-collapse { margin: 8px 0 0 21px; padding: 2px 6px; border: 1px solid var(--controlBorder); background: transparent; color: var(--mutedStrong); cursor: pointer; font-size: 11px; }
+.stage-collapse:hover { background: var(--hover); color: var(--text); }
 .stage-canvas { position: sticky; top: var(--axis-height); align-self: start; display: block; width: 100%; cursor: crosshair; touch-action: none; }
 .timeline-footer { padding: 6px 9px; border-top: 1px solid var(--border); color: var(--muted); font-size: 11px; }
 
@@ -185,6 +194,14 @@ button { cursor: pointer; }
 .breakdown-table .kernel-name { text-align: left; text-overflow: ellipsis; }
 .breakdown-table .breakdown-empty { padding: 18px 10px; text-align: left; color: var(--muted); }
 .breakdown-table tbody tr:hover { background: var(--hover); }
+.stream-menu { position: fixed; z-index: 40; min-width: 180px; padding: 4px; border: 1px solid var(--controlBorder); background: var(--surface); box-shadow: 0 4px 12px #0006; }
+.stream-menu button { display: block; width: 100%; padding: 5px 9px; border: 0; background: transparent; color: var(--text); cursor: pointer; font-size: 12px; text-align: left; }
+.stream-menu button:hover, .stream-menu button:focus { background: var(--hover); outline: 0; }
+.stream-menu .has-submenu::after { content: "▸"; float: right; margin-left: 16px; color: var(--muted); }
+.submenu-wrap { position: relative; }
+.stream-submenu { display: none; position: absolute; top: -5px; left: 100%; min-width: 180px; max-height: calc(100vh - 8px); overflow-y: auto; padding: 4px; border: 1px solid var(--controlBorder); background: var(--surface); box-shadow: 0 4px 12px #0006; }
+.stream-menu.flip .stream-submenu { left: auto; right: 100%; }
+.submenu-wrap:hover > .stream-submenu, .submenu-wrap:focus-within > .stream-submenu { display: block; }
 .tooltip { position: fixed; z-index: 30; width: 315px; pointer-events: none; padding: 9px 10px; border: 1px solid var(--controlBorder); background: var(--tooltipBg); box-shadow: 0 4px 12px #0006; }
 .tooltip strong { display: block; overflow-wrap: anywhere; color: var(--text); font: 11px ui-monospace, Consolas, monospace; }
 .tooltip span { display: block; margin-top: 6px; color: var(--mutedStrong); font: 10px ui-monospace, Consolas, monospace; }
@@ -200,7 +217,7 @@ button { cursor: pointer; }
   .workspace-heading { align-items: flex-start; flex-direction: column; gap: 4px; }
   .timeline-head, .stage-row { grid-template-columns: 145px minmax(0, 1fr); }
   .stage-label { width: 102px; }
-  .stage-sub { margin-left: 0; }
+  .stage-sub, .stage-collapse { margin-left: 0; }
   .search-box input { width: 105px; }
   .timeline-footer { font-size: 10px; }
 }
