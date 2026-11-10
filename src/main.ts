@@ -617,7 +617,11 @@ function renderRows(): void {
     const last = layouts.at(-1);
     const rowHeight = last ? last.top + last.laneCount * 24 + 8 : 38;
     row.style.height = `${rowHeight}px`;
-    canvas.style.height = `${rowHeight - 1}px`;
+    // Rows can be thousands of pixels tall (one track per stream). Keep the
+    // canvas viewport-sized and sticky, and draw the scrolled-to slice of the
+    // row: canvases taller than the GPU max texture size (16384 device px)
+    // fall back to software raster and make every frame take hundreds of ms.
+    canvas.style.height = `min(${rowHeight - 1}px, calc(100vh - var(--axis-height)))`;
     canvas.setAttribute("aria-label", `${stageLabels[deviceId]} GPU timeline`);
     bindTimelineEvents(canvas, stage);
     row.append(meta, canvas);
@@ -763,21 +767,39 @@ function firstVisible(lane: KernelLane, start: number): number {
   return low;
 }
 
+// How far the sticky canvas has slid down inside its row, i.e. the row-space y
+// of the canvas's top edge.
+function rowScrollOffset(canvas: HTMLCanvasElement): number {
+  const row = canvas.parentElement;
+  if (!row) return 0;
+  return canvas.getBoundingClientRect().top - row.getBoundingClientRect().top;
+}
+
 function drawStage(canvas: HTMLCanvasElement, stage: Stage): void {
+  const rowRect = canvas.parentElement?.getBoundingClientRect();
+  if (rowRect && (rowRect.bottom < 0 || rowRect.top > window.innerHeight)) return;
   const surface = prepareCanvas(canvas);
   if (!surface || !trace) return;
   const { context: ctx, width, height } = surface;
+  const offset = rowScrollOffset(canvas);
   const colors = canvasColors();
   ctx.fillStyle = colors.background;
   ctx.fillRect(0, 0, width, height);
-  const layouts = layoutsByDevice.get(stage.deviceId) ?? [];
-  for (const [index, layout] of layouts.entries()) {
+  const allLayouts = layoutsByDevice.get(stage.deviceId) ?? [];
+  const isVisible = (layout: StreamLayout) =>
+    layout.top + layout.laneCount * 24 + 2 > offset && layout.top < offset + height;
+  const layouts = allLayouts.filter(isVisible);
+  ctx.save();
+  ctx.translate(0, -offset);
+  for (const [index, layout] of allLayouts.entries()) {
+    if (!isVisible(layout)) continue;
     ctx.fillStyle = index % 2 ? colors.alternate : colors.track;
     ctx.fillRect(0, layout.top, width, layout.laneCount * 24 + 2);
     ctx.font = "10px ui-monospace, SFMono-Regular, Consolas, monospace";
     ctx.fillStyle = colors.text;
     ctx.fillText(`S${layout.id}`, 6, layout.top + 16);
   }
+  ctx.restore();
 
   for (const value of tickValues()) {
     const x = xFor(value, width);
@@ -791,6 +813,8 @@ function drawStage(canvas: HTMLCanvasElement, stage: Stage): void {
   const term = search.value.trim().toLowerCase();
   ctx.font = "11px ui-monospace, SFMono-Regular, Consolas, monospace";
   ctx.textBaseline = "middle";
+  ctx.save();
+  ctx.translate(0, -offset);
   for (const layout of layouts) {
     const lane = kernelsByStream.get(stage.deviceId)?.get(layout.id);
     if (!lane) continue;
@@ -832,6 +856,7 @@ function drawStage(canvas: HTMLCanvasElement, stage: Stage): void {
       }
     }
   }
+  ctx.restore();
   ctx.globalAlpha = 1;
   drawSelection(ctx, width, height);
 }
@@ -906,7 +931,7 @@ function hitKernel(stage: Stage, canvas: HTMLCanvasElement, event: PointerEvent)
   if (!trace) return null;
   const rect = canvas.getBoundingClientRect();
   const x = event.clientX - rect.left;
-  const y = event.clientY - rect.top;
+  const y = event.clientY - rect.top + rowScrollOffset(canvas);
   const time = viewStartMs + (x / rect.width) * (viewEndMs - viewStartMs);
   const layout = layoutsByDevice.get(stage.deviceId)?.find(
     (item) => y >= item.top && y < item.top + item.laneCount * 24,
@@ -1158,3 +1183,6 @@ search.addEventListener("input", () => {
   renderBreakdown();
 });
 new ResizeObserver(requestDraw).observe(element<HTMLElement>("#workspace"));
+// Stage canvases only hold the visible slice of each row, so redraw on scroll.
+window.addEventListener("scroll", requestDraw, { passive: true });
+window.addEventListener("resize", requestDraw);
