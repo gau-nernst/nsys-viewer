@@ -387,7 +387,8 @@ async function openFile(file: File): Promise<void> {
 function loadTrace(data: TraceData): void {
   if (pendingFile) {
     fileKey = pendingFile.key;
-    fileName = pendingFile.name;
+    // The default title names the trace, not its compression.
+    fileName = pendingFile.name.replace(/\.gz$/i, "");
     pendingFile = null;
   }
   traceTitle = fileName;
