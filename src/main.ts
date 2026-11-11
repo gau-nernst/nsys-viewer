@@ -1,4 +1,5 @@
 import { FileDragDepth, isFileDrag } from "./filedrop";
+import { heldKeysView, isNavKey, isTextEntry } from "./wasd";
 import "./style.css";
 import type { KernelEvent, Stage, TraceData, WorkerResponse } from "./types";
 import { overlapDuration, summarizeKernels, type KernelSummary, type TimeSpan } from "./breakdown";
@@ -67,7 +68,7 @@ app.innerHTML = `
             <canvas id="axis-canvas" class="axis-canvas" aria-label="Time axis"></canvas>
           </div>
           <div id="stage-rows" class="stage-rows"></div>
-          <div class="timeline-footer">Drag to measure · drag either edge to adjust · click elsewhere on the timeline or press Esc to clear · Shift+drag or horizontal scroll to pan · pinch or +/− to zoom</div>
+          <div class="timeline-footer">Drag to measure · drag either edge to adjust · click elsewhere on the timeline or press Esc to clear · Shift+drag or horizontal scroll to pan · pinch, +/− or hold W / S to zoom · A / D to pan</div>
         </div>
 
         <div class="inspector-card">
@@ -188,6 +189,10 @@ let trackDrop: { panel: string; key: string; after: boolean } | null = null;
 let kernelColors = new Map<number, string>();
 let viewStartMs = 0;
 let viewEndMs = 1;
+let pointerFraction: number | null = null;
+const heldNavKeys = new Set<string>();
+let heldNavLastMs = 0;
+let heldNavRunning = false;
 let selected: KernelEvent | null = null;
 let hovered: KernelEvent | null = null;
 let selection: TimeSpan | null = null;
@@ -1472,6 +1477,13 @@ type TimelineDrag =
 
 function bindTimelineEvents(canvas: HTMLCanvasElement, panel?: string): void {
   let drag: TimelineDrag | null = null;
+  canvas.addEventListener("pointermove", (event) => {
+    const rect = canvas.getBoundingClientRect();
+    pointerFraction = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+  });
+  canvas.addEventListener("pointerleave", () => {
+    pointerFraction = null;
+  });
   const timeAt = (event: PointerEvent): number => {
     const rect = canvas.getBoundingClientRect();
     const fraction = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
@@ -1697,6 +1709,20 @@ element<HTMLElement>(".viewer-card").addEventListener("wheel", (event) => {
   }
 }, { capture: true, passive: false });
 element<HTMLButtonElement>("#clear-selection").addEventListener("click", () => setSelection(null));
+// WASD as in Perfetto and chrome://tracing, continuously while a key is down: W / S zoom in / out
+// around the mouse (the view centre when it is off the timeline), A / D pan left / right.
+function stepHeldKeys(now: number): void {
+  if (!heldNavKeys.size || !trace) {
+    heldNavLastMs = 0;
+    heldNavRunning = false;
+    return;
+  }
+  const elapsed = heldNavLastMs ? Math.min(50, now - heldNavLastMs) : 16;
+  heldNavLastMs = now;
+  const view = heldKeysView(viewStartMs, viewEndMs, heldNavKeys, elapsed, pointerFraction ?? 0.5);
+  if (view.start !== viewStartMs || view.end !== viewEndMs) setView(view.start, view.end);
+  requestAnimationFrame(stepHeldKeys);
+}
 window.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
   if (!streamMenu.classList.contains("hidden")) hideStreamMenu();
@@ -1707,6 +1733,23 @@ window.addEventListener("pointerdown", (event) => {
   if (!streamMenu.contains(event.target as Node)) hideStreamMenu();
 }, { capture: true });
 window.addEventListener("scroll", hideStreamMenu, { passive: true });
+// Physical keys (event.code), so WASD keeps its shape on AZERTY, Dvorak and other layouts.
+const navKeyOf = (event: KeyboardEvent) => event.code.replace(/^Key/, "").toLowerCase();
+window.addEventListener("keydown", (event) => {
+  const key = navKeyOf(event);
+  if (!isNavKey(key) || !trace || event.ctrlKey || event.metaKey || event.altKey ||
+      isTextEntry(event.target)) return;
+  event.preventDefault();
+  if (heldNavKeys.has(key)) return;
+  heldNavKeys.add(key);
+  // One loop at a time: a key released and pressed again within a frame would start a second one.
+  if (!heldNavRunning) {
+    heldNavRunning = true;
+    requestAnimationFrame(stepHeldKeys);
+  }
+});
+window.addEventListener("keyup", (event) => heldNavKeys.delete(navKeyOf(event)));
+window.addEventListener("blur", () => heldNavKeys.clear());
 bindTimelineEvents(axis);
 workspaceSelect.addEventListener("change", () => switchWorkspace(workspaceSelect.value || null));
 element<HTMLButtonElement>("#new-workspace").addEventListener("click", () => {
