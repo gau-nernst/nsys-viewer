@@ -422,6 +422,13 @@ async function openFile(file: File): Promise<void> {
     announce("Choose an Nsight SQLite export (.sqlite, .sqlite3, or .db, optionally gzipped).", true);
     return;
   }
+  if (element<HTMLButtonElement>("#open-button").disabled) {
+    announce("Still opening the previous trace; try again when it has loaded.", true);
+    return;
+  }
+  // Workspaces live only in memory, so replacing the trace would lose them.
+  if (workspaces.length && !window.confirm(
+    `Open ${file.name}? The current trace's workspaces will be discarded.`)) return;
   element<HTMLButtonElement>("#open-button").disabled = true;
   announce(`Opening ${file.name} locally…`);
   pendingFile = { key: `${file.name}:${file.size}`, name: file.name };
@@ -1669,7 +1676,7 @@ window.addEventListener("drop", (event) => {
   fileDrag.reset();
   showFileDrag(false);
   const file = event.dataTransfer?.files[0];
-  if (file && !element<HTMLButtonElement>("#open-button").disabled) void openFile(file);
+  if (file) void openFile(file);
 });
 element<HTMLButtonElement>("#fit-view").addEventListener("click", () => {
   if (trace) setView(0, trace.durationMs);
