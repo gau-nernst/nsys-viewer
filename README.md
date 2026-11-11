@@ -1,6 +1,6 @@
 # nsys-viewer
 
-A browser-only viewer for Nsight Systems SQLite exports. Open a local `.sqlite` file to inspect GPU kernel timelines and a per-kernel runtime breakdown. The file stays in your browser; there is no upload or backend.
+A browser-only viewer for Nsight Systems SQLite exports. Open a local `.sqlite` file (or a gzipped `.sqlite.gz`) to inspect GPU kernel timelines and a per-kernel runtime breakdown. The file stays in your browser; there is no upload or backend.
 
 ## Run locally
 

@@ -1,6 +1,7 @@
 import "./style.css";
 import type { KernelEvent, Stage, TraceData, WorkerResponse } from "./types";
 import { overlapDuration, summarizeKernels, type KernelSummary, type TimeSpan } from "./breakdown";
+import { maybeGunzip } from "./decompress";
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("Missing app root");
@@ -15,7 +16,7 @@ app.innerHTML = `
         <span class="local-note">Local file · no upload</span>
         <button id="theme-toggle" class="button button-subtle" type="button"></button>
         <button id="open-button" class="button" type="button">Open trace…</button>
-        <input id="file-input" type="file" accept=".sqlite,.db,.sqlite3" hidden />
+        <input id="file-input" type="file" accept=".sqlite,.db,.sqlite3,.gz" hidden />
       </div>
     </header>
 
@@ -413,15 +414,15 @@ resetTitle.addEventListener("click", () => {
 });
 
 async function openFile(file: File): Promise<void> {
-  if (!/\.(sqlite|sqlite3|db)$/i.test(file.name)) {
-    announce("Choose an Nsight SQLite export (.sqlite, .sqlite3, or .db).", true);
+  if (!/\.(sqlite|sqlite3|db)(\.gz)?$/i.test(file.name)) {
+    announce("Choose an Nsight SQLite export (.sqlite, .sqlite3, or .db, optionally gzipped).", true);
     return;
   }
   element<HTMLButtonElement>("#open-button").disabled = true;
   announce(`Opening ${file.name} locally…`);
   pendingFile = { key: `${file.name}:${file.size}`, name: file.name };
   try {
-    const buffer = await file.arrayBuffer();
+    const buffer = await maybeGunzip(await file.arrayBuffer());
     worker.postMessage({ buffer }, [buffer]);
   } catch (error) {
     announce(error instanceof Error ? error.message : String(error), true);
@@ -432,7 +433,8 @@ async function openFile(file: File): Promise<void> {
 function loadTrace(data: TraceData): void {
   if (pendingFile) {
     fileKey = pendingFile.key;
-    fileName = pendingFile.name;
+    // The default title names the trace, not its compression.
+    fileName = pendingFile.name.replace(/\.gz$/i, "");
     pendingFile = null;
   }
   traceTitle = fileName;
