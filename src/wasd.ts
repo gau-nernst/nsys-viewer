@@ -43,5 +43,5 @@ export function heldKeysView(start: number, end: number, held: Iterable<string>,
 /** True when keys typed into this target should not drive the timeline. */
 export function isTextEntry(target: EventTarget | null): boolean {
   if (!target || typeof (target as Element).closest !== "function") return false;
-  return !!(target as Element).closest("input, textarea, select, [contenteditable]");
+  return !!(target as Element).closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])');
 }

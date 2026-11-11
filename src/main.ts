@@ -192,6 +192,7 @@ let viewEndMs = 1;
 let pointerFraction: number | null = null;
 const heldNavKeys = new Set<string>();
 let heldNavLastMs = 0;
+let heldNavRunning = false;
 let selected: KernelEvent | null = null;
 let hovered: KernelEvent | null = null;
 let selection: TimeSpan | null = null;
@@ -1713,6 +1714,7 @@ element<HTMLButtonElement>("#clear-selection").addEventListener("click", () => s
 function stepHeldKeys(now: number): void {
   if (!heldNavKeys.size || !trace) {
     heldNavLastMs = 0;
+    heldNavRunning = false;
     return;
   }
   const elapsed = heldNavLastMs ? Math.min(50, now - heldNavLastMs) : 16;
@@ -1731,16 +1733,22 @@ window.addEventListener("pointerdown", (event) => {
   if (!streamMenu.contains(event.target as Node)) hideStreamMenu();
 }, { capture: true });
 window.addEventListener("scroll", hideStreamMenu, { passive: true });
+// Physical keys (event.code), so WASD keeps its shape on AZERTY, Dvorak and other layouts.
+const navKeyOf = (event: KeyboardEvent) => event.code.replace(/^Key/, "").toLowerCase();
 window.addEventListener("keydown", (event) => {
-  const key = event.key.toLowerCase();
+  const key = navKeyOf(event);
   if (!isNavKey(key) || !trace || event.ctrlKey || event.metaKey || event.altKey ||
       isTextEntry(event.target)) return;
   event.preventDefault();
   if (heldNavKeys.has(key)) return;
   heldNavKeys.add(key);
-  if (heldNavKeys.size === 1) requestAnimationFrame(stepHeldKeys);
+  // One loop at a time: a key released and pressed again within a frame would start a second one.
+  if (!heldNavRunning) {
+    heldNavRunning = true;
+    requestAnimationFrame(stepHeldKeys);
+  }
 });
-window.addEventListener("keyup", (event) => heldNavKeys.delete(event.key.toLowerCase()));
+window.addEventListener("keyup", (event) => heldNavKeys.delete(navKeyOf(event)));
 window.addEventListener("blur", () => heldNavKeys.clear());
 bindTimelineEvents(axis);
 workspaceSelect.addEventListener("change", () => switchWorkspace(workspaceSelect.value || null));
