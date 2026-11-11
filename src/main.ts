@@ -1230,15 +1230,21 @@ function drawTracks(canvas: HTMLCanvasElement, panel: string): void {
     const lane = kernelsByStream.get(layout.deviceId)?.get(layout.id);
     if (!lane) continue;
     const lastTinyPixel = new Array<number>(layout.laneCount).fill(-1);
+    const lastEndX = new Array<number>(layout.laneCount).fill(-Infinity);
     for (let i = firstVisible(lane, viewStartMs); i < lane.events.length; i++) {
       const kernel = lane.events[i];
       if (kernel.startMs > viewEndMs) break;
-      if (kernel.endMs < viewStartMs) continue;
-      const x0 = Math.max(0, xFor(kernel.startMs, width));
-      const x1 = Math.min(width, xFor(kernel.endMs, width));
-      const barWidth = Math.max(1, x1 - x0);
       // A collapsed stream draws every overlap lane into one thin strip.
       const overlapLane = layout.collapsed ? 0 : kernel.overlapLane ?? 0;
+      // A kernel that starts less than a pixel after the previous one in its lane ends
+      // touches it on screen and needs a divider; one after idle time keeps its full width.
+      const startX = xFor(kernel.startMs, width);
+      const touches = startX - lastEndX[overlapLane] < 1;
+      lastEndX[overlapLane] = Math.max(lastEndX[overlapLane], xFor(kernel.endMs, width));
+      if (kernel.endMs < viewStartMs) continue;
+      const x0 = Math.max(0, startX);
+      const x1 = Math.min(width, xFor(kernel.endMs, width));
+      const barWidth = Math.max(1, x1 - x0);
       const top = layout.top + (layout.collapsed ? 3 : 3 + overlapLane * LANE_HEIGHT);
       const barHeight = layout.collapsed ? COLLAPSED_HEIGHT - 6 : 20;
       if (barWidth <= 1 && Math.floor(x0) === lastTinyPixel[overlapLane]) continue;
@@ -1247,10 +1253,11 @@ function drawTracks(canvas: HTMLCanvasElement, panel: string): void {
       ctx.globalAlpha = term && !name.toLowerCase().includes(term) ? 0.13 : 0.92;
       ctx.fillStyle = kernelColors.get(kernel.nameId) ?? "#587f95";
       ctx.fillRect(x0, top, barWidth, barHeight);
-      if (barWidth >= 3 && ctx.globalAlpha > 0.5) {
-        ctx.strokeStyle = colors.edge;
-        ctx.lineWidth = 1;
-        ctx.strokeRect(x0 + 0.5, top + 0.5, barWidth - 1, barHeight - 1);
+      if (touches && barWidth >= 3 && ctx.globalAlpha > 0.5) {
+        // One 1 px divider at the kernel's start: back-to-back kernels stay 1 px apart. A border on both
+        // sides put 2-3 px of near-background colour between them, which reads as an idle gap.
+        ctx.fillStyle = colors.edge;
+        ctx.fillRect(Math.round(x0), top, 1, barHeight);
       }
       if (!layout.collapsed && barWidth >= 10 && ctx.globalAlpha > 0.5) {
         ctx.save();
