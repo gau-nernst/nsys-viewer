@@ -194,6 +194,8 @@ button { cursor: pointer; }
 .breakdown-table .kernel-name { text-align: left; text-overflow: ellipsis; }
 .breakdown-table .breakdown-empty { padding: 18px 10px; text-align: left; color: var(--muted); }
 .breakdown-table tbody tr:hover { background: var(--hover); }
+.breakdown-table tbody tr.breakdown-row { cursor: pointer; }
+.breakdown-table tbody tr.focused, .breakdown-table tbody tr.focused:hover { background: color-mix(in srgb, var(--accent) 14%, transparent); box-shadow: inset 3px 0 0 var(--accent); }
 .stream-menu { position: fixed; z-index: 40; min-width: 180px; padding: 4px; border: 1px solid var(--controlBorder); background: var(--surface); box-shadow: 0 4px 12px #0006; }
 .stream-menu button { display: block; width: 100%; padding: 5px 9px; border: 0; background: transparent; color: var(--text); cursor: pointer; font-size: 12px; text-align: left; }
 .stream-menu button:hover, .stream-menu button:focus { background: var(--hover); outline: 0; }
@@ -206,6 +208,21 @@ button { cursor: pointer; }
 .tooltip strong { display: block; overflow-wrap: anywhere; color: var(--text); font: 11px ui-monospace, Consolas, monospace; }
 .tooltip span { display: block; margin-top: 6px; color: var(--mutedStrong); font: 10px ui-monospace, Consolas, monospace; }
 .drop-overlay { position: fixed; inset: 8px; z-index: 40; display: flex; align-items: center; justify-content: center; pointer-events: none; border: 2px dashed var(--accent); background: color-mix(in srgb, var(--surface) 70%, transparent); color: var(--text); font-size: 14px; font-weight: 600; }
+.focus-bar { position: fixed; left: 50%; bottom: 16px; z-index: 45; display: flex; align-items: center; gap: 8px; max-width: calc(100vw - 32px); transform: translateX(-50%); padding: 5px 6px 5px 10px; border: 1px solid var(--accent); background: var(--toastBg); box-shadow: 0 4px 14px #0005; color: var(--text); font: 11px ui-monospace, SFMono-Regular, Consolas, monospace; white-space: nowrap; }
+.focus-bar strong { flex: 0 1 auto; min-width: 0; max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
+.focus-bar button { min-width: 26px; height: 24px; border: 1px solid var(--controlBorder); background: var(--button); color: var(--text); cursor: pointer; font-size: 14px; line-height: 1; }
+.focus-bar button:hover { background: var(--hover); }
+.focus-bar > * { flex: none; }
+.focus-swatch { width: 10px; height: 10px; }
+.focus-label { color: var(--accent); font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; font-size: 10px; }
+.focus-bar .focus-clear { display: inline-flex; align-items: center; gap: 6px; padding: 0 8px; font: 600 12px system-ui, sans-serif; }
+.focus-clear kbd { padding: 1px 4px; border: 1px solid var(--controlBorder); color: var(--mutedStrong); font: 10px ui-monospace, Consolas, monospace; }
+body.focus-active { padding-bottom: 64px; }
+/* The focused row toggles focus off; the × says so. */
+.breakdown-table tr.focused .kernel-name::before { content: "×"; margin-right: 6px; color: var(--accent); font-weight: 700; }
+.focus-muted { color: var(--mutedStrong); }
+.inspector-title { display: flex; align-items: center; gap: 10px; }
+.inspector-title .button { height: 22px; padding: 0 8px; font-size: 11px; }
 .toast { position: fixed; bottom: 12px; right: 12px; z-index: 50; max-width: 390px; border: 1px solid var(--controlBorder); background: var(--toastBg); color: var(--text); padding: 9px 11px; font-size: 11px; }
 .toast.error { border-color: var(--errorBorder); background: var(--errorBg); }
 

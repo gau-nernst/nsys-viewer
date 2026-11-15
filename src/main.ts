@@ -72,7 +72,7 @@ app.innerHTML = `
         </div>
 
         <div class="inspector-card">
-          <div class="inspector-title">Kernel details</div>
+          <div class="inspector-title">Kernel details <button id="inspector-focus" class="button button-subtle hidden" type="button">Focus this kernel</button></div>
           <div id="inspector-content" class="inspector-empty">Click any kernel bar to see its name, duration, device, and stream.</div>
         </div>
 
@@ -101,6 +101,13 @@ app.innerHTML = `
       </section>
     </main>
     <div id="drop-overlay" class="drop-overlay hidden" aria-hidden="true"><span>Drop to open the trace</span></div>
+    <div id="focus-bar" class="focus-bar hidden" role="toolbar" aria-label="Kernel focus">
+      <span class="focus-label">Focused</span>
+      <span id="focus-swatch" class="focus-swatch" aria-hidden="true"></span>
+      <strong id="focus-name">—</strong>
+      <span id="focus-stats" class="focus-muted">—</span>
+      <button id="clear-focus" class="focus-clear" type="button" aria-label="Clear kernel focus (Esc)">Clear <kbd>Esc</kbd></button>
+    </div>
     <div id="toast" class="toast hidden" role="status"></div>
     <div id="tooltip" class="tooltip hidden" role="tooltip"></div>
     <div id="stream-menu" class="stream-menu hidden" role="menu"></div>
@@ -199,6 +206,11 @@ const heldNavKeys = new Set<string>();
 let heldNavLastMs = 0;
 let heldNavRunning = false;
 let selected: KernelEvent | null = null;
+// Kernel name picked in the breakdown table: its instances stay bright on the
+// timeline and every other kernel is dimmed.
+let focusedKernel: string | null = null;
+// Every instance of the focused kernel in start order, for the stats and axis ticks.
+let focusInstances: KernelEvent[] = [];
 let hovered: KernelEvent | null = null;
 let selection: TimeSpan | null = null;
 let drawPending = false;
@@ -256,6 +268,7 @@ const darkCanvas = {
   edge: "#15191d", hover: "#f4dfb0", selected: "#f0c779",
   rangeFill: "#d5b26b24", rangeEdge: "#e7c277", chip: "#252b30e6",
   chipSelected: "#d5b26b", chipSelectedText: "#17191c", trackSelected: "#d5b26b1f",
+  focus: "#5cc8ff",
 };
 const lightCanvas = {
   axis: "#f0f2f5", background: "#fff", track: "#edf1f4",
@@ -263,6 +276,7 @@ const lightCanvas = {
   edge: "#fff", hover: "#644812", selected: "#875714",
   rangeFill: "#ad854124", rangeEdge: "#9b6b1f", chip: "#edf1f4e6",
   chipSelected: "#9b6b1f", chipSelectedText: "#fff", trackSelected: "#9b6b1f1a",
+  focus: "#0a6aa6",
 };
 
 function canvasColors() {
@@ -467,6 +481,9 @@ function loadTrace(data: TraceData): void {
   finishTitleEdit(false);
   applyTraceTitle();
   trace = data;
+  focusedKernel = null;
+  focusInstances = [];
+  updateFocusBar();
   hideStreamMenu();
   trackDrop = null;
   zoomTarget = null;
@@ -858,6 +875,33 @@ function percent(part: number, whole: number): string {
   return `${value < 0.1 ? value.toFixed(2) : value.toFixed(1)}%`;
 }
 
+function updateFocusBar(): void {
+  const bar = element<HTMLElement>("#focus-bar");
+  bar.classList.toggle("hidden", !focusedKernel);
+  // Room at the page bottom so the bar never covers the last table rows.
+  document.body.classList.toggle("focus-active", !!focusedKernel);
+  if (!focusedKernel || !trace) return;
+  const name = element<HTMLElement>("#focus-name");
+  name.textContent = shortName(focusedKernel);
+  name.title = focusedKernel;
+  const first = focusInstances[0];
+  element<HTMLElement>("#focus-swatch").style.background =
+    (first && kernelColors.get(first.nameId)) || "#587f95";
+  const gpuMs = focusInstances.reduce((sum, kernel) => sum + kernel.endMs - kernel.startMs, 0);
+  element<HTMLElement>("#focus-stats").textContent =
+    `${focusInstances.length.toLocaleString()} calls · ${formatTime(gpuMs)}`;
+}
+
+function setFocusedKernel(name: string | null): void {
+  focusedKernel = name;
+  focusInstances = name && trace
+    ? trace.kernels.filter((kernel) => trace!.names[kernel.nameId] === name) : [];
+  updateFocusBar();
+  renderBreakdown();
+  if (selected) inspect(selected);
+  requestDraw();
+}
+
 function renderBreakdown(): void {
   if (!trace) return;
   const spanDurationMs = selection ? selection.end - selection.start : trace.durationMs;
@@ -890,6 +934,12 @@ function renderBreakdown(): void {
   const fragment = document.createDocumentFragment();
   for (const row of filtered) {
     const tr = document.createElement("tr");
+    tr.className = "breakdown-row";
+    if (row.name === focusedKernel) tr.classList.add("focused");
+    tr.setAttribute("aria-selected", String(row.name === focusedKernel));
+    tr.title = row.name === focusedKernel ? "Click to clear focus"
+      : "Click to highlight this kernel on the timeline";
+    tr.addEventListener("click", () => setFocusedKernel(row.name === focusedKernel ? null : row.name));
     const cells = [
       row.name,
       row.count.toLocaleString(),
@@ -1195,6 +1245,19 @@ function drawAxis(): void {
     ctx.fillStyle = colors.text;
     ctx.fillText(formatTime(value), Math.min(x + 5, width - 65), height / 2);
   }
+  // Where the focused kernel runs: one tick per pixel along the axis bottom.
+  if (focusInstances.length) {
+    ctx.fillStyle = colors.focus;
+    let lastPixel = -1;
+    for (const kernel of focusInstances) {
+      if (kernel.endMs < viewStartMs) continue;
+      if (kernel.startMs > viewEndMs) break;
+      const x = Math.floor(Math.max(0, xFor(kernel.startMs, width)));
+      if (x === lastPixel) continue;
+      lastPixel = x;
+      ctx.fillRect(x, height - 6, Math.max(1, xFor(kernel.endMs, width) - x), 5);
+    }
+  }
   drawSelection(ctx, width, height, true);
 }
 
@@ -1215,6 +1278,23 @@ function trackOffset(canvas: HTMLCanvasElement, panel: string): number {
   const row = canvas.parentElement;
   if (!row) return 0;
   return canvas.getBoundingClientRect().top - row.getBoundingClientRect().top;
+}
+
+// Which kernel names pass the focus and search filters, by name id. Cached:
+// string matching per kernel per frame is far too slow at full-trace zoom.
+let matchCache: { focus: string | null; term: string; names: Record<number, string>; result: Uint8Array } | null = null;
+function matchingNames(term: string): Uint8Array {
+  const names = trace?.names ?? {};
+  if (matchCache && matchCache.focus === focusedKernel && matchCache.term === term &&
+      matchCache.names === names) return matchCache.result;
+  const entries = Object.entries(names).map(([id, name]) => [Number(id), name] as const);
+  const result = new Uint8Array(entries.reduce((most, [id]) => Math.max(most, id + 1), 0));
+  for (const [id, name] of entries) {
+    result[id] = Number((focusedKernel === null || name === focusedKernel) &&
+      (term === "" || name.toLowerCase().includes(term)));
+  }
+  matchCache = { focus: focusedKernel, term, names, result };
+  return result;
 }
 
 function drawTracks(canvas: HTMLCanvasElement, panel: string): void {
@@ -1254,6 +1334,39 @@ function drawTracks(canvas: HTMLCanvasElement, panel: string): void {
   }
 
   const term = search.value.trim().toLowerCase();
+  // Focus (from the breakdown table) and search both pick kernels; the rest
+  // stay visible but fade, keeping their names.
+  const filtering = focusedKernel !== null || term !== "";
+  const matching = filtering ? matchingNames(term) : null;
+  // Matches, the selected and the hovered kernel: drawn after everything
+  // else, so neighbours never cover them or their outlines.
+  const raised: {
+    kernel: KernelEvent; x0: number; barWidth: number; top: number;
+    barHeight: number; touches: boolean; collapsed: boolean; alpha: number;
+  }[] = [];
+  // Positional arguments: this runs for every drawn kernel, so it allocates nothing.
+  const drawBar = (kernel: KernelEvent, x0: number, barWidth: number, top: number,
+    barHeight: number, touches: boolean, collapsed: boolean, alpha: number) => {
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = kernelColors.get(kernel.nameId) ?? "#587f95";
+    ctx.fillRect(x0, top, barWidth, barHeight);
+    if (touches && barWidth >= 3) {
+      // One 1 px divider at the kernel's start: back-to-back kernels stay 1 px apart. A border on both
+      // sides put 2-3 px of near-background colour between them, which reads as an idle gap.
+      ctx.fillStyle = colors.edge;
+      ctx.fillRect(Math.round(x0), top, 1, barHeight);
+    }
+    if (!collapsed && barWidth >= 10) {
+      ctx.save();
+      ctx.globalAlpha = Math.max(alpha, 0.75);
+      ctx.beginPath();
+      ctx.rect(x0 + 2, top, barWidth - 3, 20);
+      ctx.clip();
+      ctx.fillStyle = "#fff";
+      ctx.fillText(trace!.names[kernel.nameId] ?? "", x0 + 3, top + 10);
+      ctx.restore();
+    }
+  };
   ctx.font = "11px ui-monospace, SFMono-Regular, Consolas, monospace";
   ctx.textBaseline = "middle";
   ctx.save();
@@ -1262,6 +1375,7 @@ function drawTracks(canvas: HTMLCanvasElement, panel: string): void {
     const lane = kernelsByStream.get(layout.deviceId)?.get(layout.id);
     if (!lane) continue;
     const lastTinyPixel = new Array<number>(layout.laneCount).fill(-1);
+    const lastDimTinyPixel = new Array<number>(layout.laneCount).fill(-1);
     const lastEndX = new Array<number>(layout.laneCount).fill(-Infinity);
     for (let i = firstVisible(lane, viewStartMs); i < lane.events.length; i++) {
       const kernel = lane.events[i];
@@ -1279,34 +1393,36 @@ function drawTracks(canvas: HTMLCanvasElement, panel: string): void {
       const barWidth = Math.max(1, x1 - x0);
       const top = layout.top + (layout.collapsed ? 3 : 3 + overlapLane * LANE_HEIGHT);
       const barHeight = layout.collapsed ? COLLAPSED_HEIGHT - 6 : 20;
-      if (barWidth <= 1 && Math.floor(x0) === lastTinyPixel[overlapLane]) continue;
-      if (barWidth <= 1) lastTinyPixel[overlapLane] = Math.floor(x0);
-      const name = trace.names[kernel.nameId] ?? "";
-      ctx.globalAlpha = term && !name.toLowerCase().includes(term) ? 0.13 : 0.92;
-      ctx.fillStyle = kernelColors.get(kernel.nameId) ?? "#587f95";
-      ctx.fillRect(x0, top, barWidth, barHeight);
-      if (touches && barWidth >= 3 && ctx.globalAlpha > 0.5) {
-        // One 1 px divider at the kernel's start: back-to-back kernels stay 1 px apart. A border on both
-        // sides put 2-3 px of near-background colour between them, which reads as an idle gap.
-        ctx.fillStyle = colors.edge;
-        ctx.fillRect(Math.round(x0), top, 1, barHeight);
-      }
-      if (!layout.collapsed && barWidth >= 10 && ctx.globalAlpha > 0.5) {
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(x0 + 2, top, barWidth - 3, 20);
-        ctx.clip();
-        ctx.fillStyle = "#fff";
-        ctx.fillText(name, x0 + 3, top + 10);
-        ctx.restore();
-      }
-      if (kernel === selected || kernel === hovered) {
-        ctx.globalAlpha = 1;
-        ctx.strokeStyle = kernel === selected ? colors.selected : colors.hover;
-        ctx.lineWidth = 2;
-        ctx.strokeRect(x0 + 0.5, top + 0.5, Math.max(2, x1 - x0), barHeight - 1);
+      const dimmed = matching !== null && !matching[kernel.nameId];
+      // Sub-pixel kernels draw once per pixel. Bright and dimmed kernels track
+      // that separately, so a dimmed one never hides a highlighted one.
+      const tiny = dimmed ? lastDimTinyPixel : lastTinyPixel;
+      if (barWidth <= 1 && Math.floor(x0) === tiny[overlapLane]) continue;
+      if (barWidth <= 1) tiny[overlapLane] = Math.floor(x0);
+      const alpha = dimmed ? 0.4 : 0.92;
+      if ((filtering && !dimmed) || kernel === selected || kernel === hovered) {
+        raised.push({ kernel, x0, barWidth, top, barHeight, touches, collapsed: layout.collapsed, alpha });
+      } else {
+        drawBar(kernel, x0, barWidth, top, barHeight, touches, layout.collapsed, alpha);
       }
     }
+  }
+  for (const bar of raised) {
+    drawBar(bar.kernel, bar.x0, bar.barWidth, bar.top, bar.barHeight, bar.touches, bar.collapsed, bar.alpha);
+  }
+  ctx.globalAlpha = 1;
+  for (const bar of raised) {
+    if (focusedKernel && matching![bar.kernel.nameId]) {
+      ctx.strokeStyle = colors.focus;
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(bar.x0 + 0.75, bar.top + 0.75, Math.max(1.5, bar.barWidth - 1.5), bar.barHeight - 1.5);
+    }
+  }
+  for (const bar of raised) {
+    if (bar.kernel !== selected && bar.kernel !== hovered) continue;
+    ctx.strokeStyle = bar.kernel === selected ? colors.selected : colors.hover;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(bar.x0 + 0.5, bar.top + 0.5, Math.max(2, bar.barWidth), bar.barHeight - 1);
   }
   // Stream chips go on top of the bars so they stay readable and clickable.
   ctx.globalAlpha = 1;
@@ -1468,6 +1584,10 @@ function showTooltip(kernel: KernelEvent, event: PointerEvent): void {
 function inspect(kernel: KernelEvent): void {
   if (!trace) return;
   selected = kernel;
+  const focusButton = element<HTMLButtonElement>("#inspector-focus");
+  const kernelName = trace.names[kernel.nameId] ?? "";
+  focusButton.classList.remove("hidden");
+  focusButton.textContent = kernelName === focusedKernel ? "Clear focus" : "Focus this kernel";
   inspector.className = selection ? "inspector-grid inspector-span" : "inspector-grid";
   inspector.replaceChildren();
   const fields: [string, string][] = [
@@ -1752,8 +1872,11 @@ function stepHeldKeys(now: number): void {
   requestAnimationFrame(stepHeldKeys);
 }
 window.addEventListener("keydown", (event) => {
-  if (event.key !== "Escape") return;
+  // Esc in a text field belongs to that field (e.g. clearing the search box).
+  if (event.key !== "Escape" || isTextEntry(event.target)) return;
+  // Focus comes right after the menu: the focus bar promises that Esc clears it.
   if (!streamMenu.classList.contains("hidden")) hideStreamMenu();
+  else if (focusedKernel) setFocusedKernel(null);
   else if (streamSelection) clearStreamSelection();
   else if (selection) setSelection(null);
 });
@@ -1799,6 +1922,12 @@ document.querySelectorAll<HTMLButtonElement>(
     }
     renderBreakdown();
   });
+});
+element<HTMLButtonElement>("#clear-focus").addEventListener("click", () => setFocusedKernel(null));
+element<HTMLButtonElement>("#inspector-focus").addEventListener("click", () => {
+  if (!trace || !selected) return;
+  const name = trace.names[selected.nameId] ?? "";
+  setFocusedKernel(name === focusedKernel ? null : name);
 });
 search.addEventListener("input", () => {
   requestDraw();
