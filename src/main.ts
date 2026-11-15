@@ -146,7 +146,12 @@ interface KernelLane {
   events: KernelEvent[];
   prefixMaxEnd: number[];
   activeEnds: number[];
+  // Only the merged all-streams lane: each event's overlap lane, since
+  // kernel.overlapLane belongs to the kernel's own stream.
+  overlapLanes?: number[];
 }
+// Reserved stream id for the per-device track that merges every stream.
+const ALL_STREAMS = -1;
 interface StreamLayout {
   deviceId: number;
   id: number;
@@ -475,23 +480,37 @@ function loadTrace(data: TraceData): void {
       events: [], prefixMaxEnd: [], activeEnds: [],
     }])),
   ]));
+  for (const streams of kernelsByStream.values()) {
+    streams.set(ALL_STREAMS, { events: [], prefixMaxEnd: [], activeEnds: [], overlapLanes: [] });
+  }
   layoutsByPanel = new Map();
   kernelColors = new Map();
-  for (const kernel of data.kernels) {
-    const lane = kernelsByStream.get(kernel.deviceId)?.get(kernel.streamId);
-    if (!lane) continue;
+  // Kernels arrive sorted by start, which firstVisible relies on.
+  const pushKernel = (lane: KernelLane, kernel: KernelEvent): number => {
     let overlapLane = lane.activeEnds.findIndex((end) => end <= kernel.startMs);
     if (overlapLane < 0) overlapLane = lane.activeEnds.length;
     lane.activeEnds[overlapLane] = kernel.endMs;
-    kernel.overlapLane = overlapLane;
     lane.events.push(kernel);
     lane.prefixMaxEnd.push(Math.max(
       kernel.endMs,
       lane.prefixMaxEnd.at(-1) ?? -Infinity,
     ));
+    return overlapLane;
+  };
+  for (const kernel of data.kernels) {
+    const streams = kernelsByStream.get(kernel.deviceId);
+    const lane = streams?.get(kernel.streamId);
+    if (!streams || !lane) continue;
+    kernel.overlapLane = pushKernel(lane, kernel);
+    const all = streams.get(ALL_STREAMS)!;
+    all.overlapLanes!.push(pushKernel(all, kernel));
   }
   refreshKernelColors();
   restoreLayout(data.stages.map((stage) => stage.deviceId));
+  // The merged track starts collapsed: expanded, it stacks concurrent kernels.
+  for (const stage of data.stages) {
+    collapsedStreams.add(`${stage.deviceId}|${streamKey(stage.deviceId, ALL_STREAMS)}`);
+  }
   computeLayouts();
   viewStartMs = 0;
   viewEndMs = data.durationMs;
@@ -542,7 +561,8 @@ function computeLayouts(): void {
   if (!trace) return;
   layoutsByPanel = new Map();
   for (const stage of trace.stages) {
-    const streams = stage.streamIds.map((streamId) => ({ deviceId: stage.deviceId, streamId }));
+    const streams = [ALL_STREAMS, ...stage.streamIds]
+      .map((streamId) => ({ deviceId: stage.deviceId, streamId }));
     layoutsByPanel.set(String(stage.deviceId), buildLayouts(String(stage.deviceId), streams));
   }
   // A workspace has one row per device; within it, tracks keep ws.tracks
@@ -616,6 +636,9 @@ function copyToWorkspace(streams: StreamRef[], target: string | null): void {
     if (existing.has(key) || !kernelsByStream.get(item.deviceId)?.has(item.streamId)) continue;
     existing.add(key);
     ws.tracks.push(item);
+    if (item.streamId === ALL_STREAMS) {
+      collapsedStreams.add(`${workspacePanel(ws.id, item.deviceId)}|${key}`);
+    }
     added++;
   }
   relayout();
@@ -788,7 +811,7 @@ function showStreamMenu(panel: string, event: MouseEvent): void {
   if (trace.stages.length > 1) {
     // Same stream id on every device, e.g. to compare ranks.
     const streamIds = [...new Set(chosen.map((layout) => layout.id))];
-    const label = streamIds.length === 1 ? `S${streamIds[0]}` : `${streamIds.length} stream ids`;
+    const label = streamIds.length === 1 ? streamName(streamIds[0]) : `${streamIds.length} stream ids`;
     entries.push({ label: `Copy ${label} on all GPUs to workspace`, children: targets(
       streamIds.flatMap((streamId) => stageOrder.map((deviceId) => ({ deviceId, streamId }))),
     ) });
@@ -812,8 +835,12 @@ function showStreamMenu(panel: string, event: MouseEvent): void {
   streamMenu.classList.toggle("flip", left + width + 260 > window.innerWidth);
 }
 
+function streamName(streamId: number): string {
+  return streamId === ALL_STREAMS ? "All streams" : `S${streamId}`;
+}
+
 function trackLabel(panel: string, layout: StreamLayout): string {
-  return `S${layout.id}`;
+  return streamName(layout.id);
 }
 
 function kernelBreakdown(device: string): { rows: KernelSummary[]; totalGpuMs: number } {
@@ -1240,7 +1267,7 @@ function drawTracks(canvas: HTMLCanvasElement, panel: string): void {
       const kernel = lane.events[i];
       if (kernel.startMs > viewEndMs) break;
       // A collapsed stream draws every overlap lane into one thin strip.
-      const overlapLane = layout.collapsed ? 0 : kernel.overlapLane ?? 0;
+      const overlapLane = layout.collapsed ? 0 : lane.overlapLanes?.[i] ?? kernel.overlapLane ?? 0;
       // A kernel that starts less than a pixel after the previous one in its lane ends
       // touches it on screen and needs a divider; one after idle time keeps its full width.
       const startX = xFor(kernel.startMs, width);
@@ -1407,7 +1434,7 @@ function hitKernel(panel: string, canvas: HTMLCanvasElement, event: PointerEvent
     const kernel = lane.events[i];
     if (kernel.startMs > time) break;
     if (kernel.endMs < time) continue;
-    if (!layout.collapsed && kernel.overlapLane !== overlapLane) continue;
+    if (!layout.collapsed && (lane.overlapLanes?.[i] ?? kernel.overlapLane) !== overlapLane) continue;
     // A collapsed track paints overlapping kernels in event order, so the
     // visible one is the last match; expanded lanes never overlap.
     if (layout.collapsed) best = kernel;
@@ -1423,7 +1450,8 @@ function showTooltip(kernel: KernelEvent, event: PointerEvent): void {
   const title = document.createElement("strong");
   title.textContent = shortName(name);
   const detail = document.createElement("span");
-  detail.textContent = `${stageLabels[kernel.deviceId]} · ${formatTime(kernel.endMs - kernel.startMs)}`;
+  detail.textContent = `${stageLabels[kernel.deviceId]} · S${kernel.streamId} · ` +
+    formatTime(kernel.endMs - kernel.startMs);
   tooltip.append(title, detail);
   if (selection) {
     const spanDetail = document.createElement("span");
