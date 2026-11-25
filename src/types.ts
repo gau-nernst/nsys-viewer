@@ -12,6 +12,8 @@ export interface Stage {
   pid: number | null;
   kernelCount: number;
   streamIds: number[];
+  // CUDA graph side stream id → the stream its graphs launch on (see graphstreams.ts).
+  graphSideOf: Record<number, number>;
 }
 
 export interface TraceData {

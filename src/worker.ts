@@ -1,5 +1,6 @@
 import initSqlJs, { type Database } from "sql.js";
 import wasmUrl from "sql.js/dist/sql-wasm.wasm?url";
+import { GRAPH_SIDE_STREAMS_SQL } from "./graphstreams";
 import type { KernelEvent, Stage, TraceData, WorkerResponse } from "./types";
 
 function scalar(db: Database, sql: string): unknown {
@@ -84,12 +85,22 @@ function readTrace(db: Database): TraceData {
     query.free();
   }
 
+  // Older exports have no graphId column; their side streams stay unfolded.
+  const graphSideOf = new Map<number, Record<number, number>>();
+  const kernelColumns = db.exec("PRAGMA table_info(CUPTI_ACTIVITY_KIND_KERNEL)")[0]?.values ?? [];
+  if (kernelColumns.some((row) => row[1] === "graphId")) {
+    for (const [deviceId, side, launch] of db.exec(GRAPH_SIDE_STREAMS_SQL)[0]?.values ?? []) {
+      if (!graphSideOf.has(Number(deviceId))) graphSideOf.set(Number(deviceId), {});
+      graphSideOf.get(Number(deviceId))![Number(side)] = Number(launch);
+    }
+  }
   const stages: Stage[] = [...counts.entries()]
     .map(([deviceId, kernelCount]) => ({
       deviceId,
       pid: pidByDevice.get(deviceId) ?? null,
       kernelCount,
       streamIds: [...(streams.get(deviceId) ?? [])].sort((a, b) => a - b),
+      graphSideOf: graphSideOf.get(deviceId) ?? {},
     }))
     .sort((a, b) => a.deviceId - b.deviceId);
 

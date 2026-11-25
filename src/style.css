@@ -1,6 +1,5 @@
 :root {
   color-scheme: dark;
-  --axis-height: 32px;
   --page: #17191c;
   --surface: #1b1e22;
   --chrome: #22252a;
@@ -136,6 +135,7 @@ button { cursor: pointer; }
 .selection-summary span { color: var(--mutedStrong); }
 .selection-summary button { border: 0; background: transparent; color: var(--mutedStrong); cursor: pointer; font-size: 16px; line-height: 16px; padding: 0 2px; }
 .selection-summary button:hover { color: var(--text); }
+.fold-toggle { display: flex; margin-right: 10px; align-items: center; gap: 5px; color: var(--mutedStrong); font-size: 12px; cursor: pointer; white-space: nowrap; }
 .search-box { height: 28px; display: flex; align-items: center; gap: 4px; border: 1px solid var(--controlBorder); background: var(--raised); padding: 0 7px; color: var(--muted); }
 .search-box span { font-size: 17px; line-height: 1; }
 .search-box input { width: 160px; border: 0; outline: 0; background: transparent; color: var(--text); font-size: 12px; }
@@ -156,7 +156,6 @@ button { cursor: pointer; }
 .stage-label { min-width: 0; width: 130px; padding: 2px 3px; border: 1px solid transparent; background: transparent; color: var(--text); outline: 0; font-size: 13px; font-weight: 600; }
 .stage-label:hover, .stage-label:focus { border-color: var(--controlBorder); background: var(--hover); }
 .stage-sub { margin: 5px 0 0 21px; color: var(--muted); font: 10px ui-monospace, Consolas, monospace; white-space: nowrap; }
-/* Sticky below the axis so a tall row (many streams) only needs a viewport-sized canvas. */
 .workspace-bar { display: flex; align-items: center; gap: 12px; padding: 6px 10px; border-bottom: 1px solid var(--border); background: var(--raised); }
 .workspace-bar .stage-label { width: 220px; }
 .workspace-bar .stage-collapse { margin: 0 0 0 auto; }
@@ -166,7 +165,7 @@ button { cursor: pointer; }
 .workspace-picker select { height: 28px; max-width: 220px; border: 1px solid var(--controlBorder); background: var(--raised); color: var(--text); font-size: 12px; }
 .stage-collapse { margin: 8px 0 0 21px; padding: 2px 6px; border: 1px solid var(--controlBorder); background: transparent; color: var(--mutedStrong); cursor: pointer; font-size: 11px; }
 .stage-collapse:hover { background: var(--hover); color: var(--text); }
-.stage-canvas { position: sticky; top: var(--axis-height); align-self: start; display: block; width: 100%; cursor: crosshair; touch-action: none; }
+.stage-canvas { position: relative; top: 0; align-self: start; display: block; width: 100%; cursor: crosshair; touch-action: none; }
 .timeline-footer { padding: 6px 9px; border-top: 1px solid var(--border); color: var(--muted); font-size: 11px; }
 
 .inspector-card { min-height: 92px; margin-top: 8px; padding: 9px 10px; }

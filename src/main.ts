@@ -57,6 +57,7 @@ app.innerHTML = `
               </span>
             </div>
             <div class="toolbar-group toolbar-right">
+              <label id="fold-toggle" class="fold-toggle hidden" title="One track for the side streams of CUDA graphs launched on each stream"><input id="fold-graph-sides" type="checkbox" checked /> Fold graph side streams</label>
               <label class="workspace-picker">Workspace <select id="workspace-select" aria-label="Workspace"></select></label>
               <button id="new-workspace" class="button button-subtle" type="button" title="Create an empty workspace">New</button>
               <label class="search-box"><span aria-hidden="true">⌕</span><input id="kernel-search" type="search" placeholder="Find kernel" aria-label="Find kernel" /></label>
@@ -159,6 +160,16 @@ interface KernelLane {
 }
 // Reserved stream id for the per-device track that merges every stream.
 const ALL_STREAMS = -1;
+// Folded CUDA graph side streams of launch stream L share track id -2 - L, after L.
+let foldGraphSides = true;
+function trackOf(stage: Stage, streamId: number): number {
+  const launch = foldGraphSides ? stage.graphSideOf[streamId] : undefined;
+  return launch === undefined ? streamId : -2 - launch;
+}
+function trackIds(stage: Stage): number[] {
+  const order = (id: number) => id < 0 ? -1.5 - id : id; // -2 - L sorts at L + 0.5
+  return [...new Set(stage.streamIds.map((id) => trackOf(stage, id)))].sort((a, b) => order(a) - order(b));
+}
 interface StreamLayout {
   deviceId: number;
   id: number;
@@ -491,37 +502,11 @@ function loadTrace(data: TraceData): void {
   selected = null;
   tooltip.classList.add("hidden");
   setSelection(null);
-  kernelsByStream = new Map(data.stages.map((stage) => [
-    stage.deviceId,
-    new Map(stage.streamIds.map((id) => [id, {
-      events: [], prefixMaxEnd: [], activeEnds: [],
-    }])),
-  ]));
-  for (const streams of kernelsByStream.values()) {
-    streams.set(ALL_STREAMS, { events: [], prefixMaxEnd: [], activeEnds: [], overlapLanes: [] });
-  }
+  element<HTMLElement>("#fold-toggle").classList.toggle("hidden",
+    !data.stages.some((stage) => Object.keys(stage.graphSideOf).length));
+  buildLanes();
   layoutsByPanel = new Map();
   kernelColors = new Map();
-  // Kernels arrive sorted by start, which firstVisible relies on.
-  const pushKernel = (lane: KernelLane, kernel: KernelEvent): number => {
-    let overlapLane = lane.activeEnds.findIndex((end) => end <= kernel.startMs);
-    if (overlapLane < 0) overlapLane = lane.activeEnds.length;
-    lane.activeEnds[overlapLane] = kernel.endMs;
-    lane.events.push(kernel);
-    lane.prefixMaxEnd.push(Math.max(
-      kernel.endMs,
-      lane.prefixMaxEnd.at(-1) ?? -Infinity,
-    ));
-    return overlapLane;
-  };
-  for (const kernel of data.kernels) {
-    const streams = kernelsByStream.get(kernel.deviceId);
-    const lane = streams?.get(kernel.streamId);
-    if (!streams || !lane) continue;
-    kernel.overlapLane = pushKernel(lane, kernel);
-    const all = streams.get(ALL_STREAMS)!;
-    all.overlapLanes!.push(pushKernel(all, kernel));
-  }
   refreshKernelColors();
   restoreLayout(data.stages.map((stage) => stage.deviceId));
   // The merged track starts collapsed: expanded, it stacks concurrent kernels.
@@ -556,6 +541,42 @@ function loadTrace(data: TraceData): void {
   toast.classList.add("hidden");
 }
 
+// Rebuilt when folding graph side streams moves kernels between tracks.
+function buildLanes(): void {
+  if (!trace) return;
+  kernelsByStream = new Map(trace.stages.map((stage) => [
+    stage.deviceId,
+    new Map(trackIds(stage).map((id) => [id, {
+      events: [], prefixMaxEnd: [], activeEnds: [],
+    }])),
+  ]));
+  for (const streams of kernelsByStream.values()) {
+    streams.set(ALL_STREAMS, { events: [], prefixMaxEnd: [], activeEnds: [], overlapLanes: [] });
+  }
+  // Kernels arrive sorted by start, which firstVisible relies on.
+  const pushKernel = (lane: KernelLane, kernel: KernelEvent): number => {
+    let overlapLane = lane.activeEnds.findIndex((end) => end <= kernel.startMs);
+    if (overlapLane < 0) overlapLane = lane.activeEnds.length;
+    lane.activeEnds[overlapLane] = kernel.endMs;
+    lane.events.push(kernel);
+    lane.prefixMaxEnd.push(Math.max(
+      kernel.endMs,
+      lane.prefixMaxEnd.at(-1) ?? -Infinity,
+    ));
+    return overlapLane;
+  };
+  const stages = new Map(trace.stages.map((stage) => [stage.deviceId, stage]));
+  for (const kernel of trace.kernels) {
+    const streams = kernelsByStream.get(kernel.deviceId);
+    const stage = stages.get(kernel.deviceId);
+    const lane = stage && streams?.get(trackOf(stage, kernel.streamId));
+    if (!streams || !lane) continue;
+    kernel.overlapLane = pushKernel(lane, kernel);
+    const all = streams.get(ALL_STREAMS)!;
+    all.overlapLanes!.push(pushKernel(all, kernel));
+  }
+}
+
 function streamKey(deviceId: number, streamId: number): string {
   return `${deviceId}:${streamId}`;
 }
@@ -578,7 +599,7 @@ function computeLayouts(): void {
   if (!trace) return;
   layoutsByPanel = new Map();
   for (const stage of trace.stages) {
-    const streams = [ALL_STREAMS, ...stage.streamIds]
+    const streams = [ALL_STREAMS, ...trackIds(stage)]
       .map((streamId) => ({ deviceId: stage.deviceId, streamId }));
     layoutsByPanel.set(String(stage.deviceId), buildLayouts(String(stage.deviceId), streams));
   }
@@ -586,7 +607,9 @@ function computeLayouts(): void {
   // order, which the user can change by dragging.
   for (const ws of workspaces) {
     for (const stage of trace.stages) {
-      const tracks = ws.tracks.filter((item) => item.deviceId === stage.deviceId);
+      // Folding hides copied tracks it merged until unfolded.
+      const tracks = ws.tracks.filter((item) => item.deviceId === stage.deviceId &&
+        kernelsByStream.get(item.deviceId)?.has(item.streamId));
       if (!tracks.length) continue;
       const panel = workspacePanel(ws.id, stage.deviceId);
       layoutsByPanel.set(panel, buildLayouts(panel, tracks));
@@ -853,7 +876,8 @@ function showStreamMenu(panel: string, event: MouseEvent): void {
 }
 
 function streamName(streamId: number): string {
-  return streamId === ALL_STREAMS ? "All streams" : `S${streamId}`;
+  if (streamId === ALL_STREAMS) return "All streams";
+  return streamId < 0 ? `S${-2 - streamId} side` : `S${streamId}`;
 }
 
 function trackLabel(panel: string, layout: StreamLayout): string {
@@ -993,17 +1017,21 @@ function renderBreakdown(): void {
   });
 }
 
-// Rows can be thousands of pixels tall (one track per stream). Keep the canvas
-// viewport-sized and sticky, and draw the scrolled-to slice of the row:
-// canvases taller than the GPU max texture size (16384 device px) fall back to
-// software raster and make every frame take hundreds of ms.
+// Rows can be thousands of pixels tall (one track per stream). Canvases taller than
+// the GPU max texture size (16384 device px) fall back to software raster and make
+// every frame take hundreds of ms, so placeCanvas keeps each canvas to the visible
+// slice of its row plus OVERDRAW_PX either side. It scrolls with the row, not sticky:
+// the compositor scrolls before the next draw, and a sticky canvas showed stale
+// tracks for a frame on every scroll step.
+const OVERDRAW_PX = 400;
+
 function appendTimeline(row: HTMLElement, panel: string, label: string): void {
   const canvas = document.createElement("canvas");
   canvas.className = "stage-canvas";
   const rowHeight = panelContentHeight(panel);
   // min-height: a row with few/collapsed tracks still fits its device controls.
   row.style.minHeight = `${rowHeight}px`;
-  canvas.style.height = `min(${rowHeight - 1}px, calc(100vh - var(--axis-height)))`;
+  canvas.style.height = `${Math.min(rowHeight - 1, window.innerHeight)}px`;
   canvas.setAttribute("aria-label", label);
   bindTimelineEvents(canvas, panel);
   row.append(canvas);
@@ -1272,7 +1300,7 @@ function firstVisible(lane: KernelLane, start: number): number {
   return low;
 }
 
-// Panel-space y of the canvas's top edge: how far the sticky canvas has slid
+// Panel-space y of the canvas's top edge: how far placeCanvas has slid it
 // down inside its row.
 function trackOffset(canvas: HTMLCanvasElement, panel: string): number {
   const row = canvas.parentElement;
@@ -1297,9 +1325,21 @@ function matchingNames(term: string): Uint8Array {
   return result;
 }
 
+function placeCanvas(canvas: HTMLCanvasElement, row: HTMLElement, rowRect: DOMRect): void {
+  const rowHeight = row.clientHeight;
+  const height = Math.min(rowHeight, window.innerHeight + 2 * OVERDRAW_PX);
+  const visibleTop = axis.getBoundingClientRect().bottom - rowRect.top;
+  const top = Math.round(Math.max(0, Math.min(rowHeight - height, visibleTop - OVERDRAW_PX)));
+  canvas.style.height = `${height}px`;
+  canvas.style.top = `${top}px`;
+}
+
 function drawTracks(canvas: HTMLCanvasElement, panel: string): void {
-  const rowRect = canvas.parentElement?.getBoundingClientRect();
-  if (rowRect && (rowRect.bottom < 0 || rowRect.top > window.innerHeight)) return;
+  const row = canvas.parentElement;
+  if (!row) return;
+  const rowRect = row.getBoundingClientRect();
+  if (rowRect.bottom < -OVERDRAW_PX || rowRect.top > window.innerHeight + OVERDRAW_PX) return;
+  placeCanvas(canvas, row, rowRect);
   const surface = prepareCanvas(canvas);
   if (!surface || !trace) return;
   const { context: ctx, width, height } = surface;
@@ -1922,6 +1962,11 @@ document.querySelectorAll<HTMLButtonElement>(
     }
     renderBreakdown();
   });
+});
+element<HTMLInputElement>("#fold-graph-sides").addEventListener("change", (event) => {
+  foldGraphSides = (event.target as HTMLInputElement).checked;
+  buildLanes();
+  relayout();
 });
 element<HTMLButtonElement>("#clear-focus").addEventListener("click", () => setFocusedKernel(null));
 element<HTMLButtonElement>("#inspector-focus").addEventListener("click", () => {

@@ -28,6 +28,8 @@ URL such as `https://<user>.github.io/<repo>/` and when previewed locally.
 
 Drop a file anywhere on the page to open it, also to replace the open trace. Drag device rows to reorder them, or edit their labels. Drag across the timeline to measure a span; drag its edges to adjust it. Shift+drag or scroll horizontally to pan, and pinch or use +/− to zoom; hold W / S to zoom in / out around the mouse and A / D to pan, as in Perfetto and chrome://tracing. Click a kernel for details. Row order and labels are saved locally in the browser.
 
+CUDA graphs that fork during capture run those branches on a private stream per graph, so a trace with many graphs can show hundreds of near-empty streams. These side streams are folded into one track after the stream the graphs launch on, such as **S19 side**; untick **Fold graph side streams** in the toolbar to split them out. Tooltips and kernel details still show the real stream.
+
 Each stream is a track. Click a track's ▾/▸ arrow to collapse or expand it. Click its label to select it; Shift+click selects a range and Cmd/Ctrl+click toggles one. Right-click a track to collapse, expand or collapse all other tracks, or to copy the selection (or the same stream on every GPU) to a workspace. Workspaces, picked from the timeline toolbar, show only the copied streams, still grouped by GPU; drag a track's label to reorder it within its GPU. Collapsed tracks and workspaces are kept in memory only and reset when a trace is opened.
 
 The browser tab title defaults to the SQLite filename. Double-click the trace heading or click **Rename** to set an alias; Enter or clicking away saves it, and Escape cancels. **Reset title** restores the filename. Aliases are saved locally per filename and file size.
